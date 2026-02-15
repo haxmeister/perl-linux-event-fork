@@ -90,8 +90,9 @@ sub _new ($class, %args) {
     saw_exit => 0,
     exit     => undef,
 
-    eof_out  => ($args{capture_stdout} ? 0 : 1),
-    eof_err  => ($args{capture_stderr} ? 0 : 1),
+    # Correct initialization: EOF only if we are not capturing that stream.
+    eof_out  => 1,  # fixed below
+    eof_err  => 1,  # fixed below
 
     _canceled => 0,
   }, $class;
@@ -99,6 +100,9 @@ sub _new ($class, %args) {
   croak "loop missing" if !$self->{loop};
   croak "pid missing"  if !$self->{pid};
   croak "unknown args: " . join(", ", sort keys %args) if %args;
+
+  $self->{eof_out} = $self->{out_r} ? 0 : 1;
+  $self->{eof_err} = $self->{err_r} ? 0 : 1;
 
   return $self;
 }
@@ -159,6 +163,7 @@ sub _arm ($self) {
   my $loop = $self->{loop};
 
   if ($self->{out_r}) {
+    $self->{eof_out} = 0;  # ensure correct even if caller mutated state
     $self->{w_out} = $loop->watch($self->{out_r},
       read  => sub ($loop, $fh, $w) { $self->_drain_stream('out') },
       error => sub ($loop, $fh, $w) { $self->_drain_stream('out') },
@@ -168,6 +173,7 @@ sub _arm ($self) {
   }
 
   if ($self->{err_r}) {
+    $self->{eof_err} = 0;
     $self->{w_err} = $loop->watch($self->{err_r},
       read  => sub ($loop, $fh, $w) { $self->_drain_stream('err') },
       error => sub ($loop, $fh, $w) { $self->_drain_stream('err') },

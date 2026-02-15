@@ -65,7 +65,7 @@ but uses a per-loop cached helper for minimal overhead.
 =head1 SPAWN API
 
   my $child = $loop->fork(
-    cmd => [ $path, @argv ],     # required
+    cmd => [ $path, @argv ],     # OR: child => sub { ... } (see below)
 
     on_stdout => sub ($child, $chunk) { ... },  # optional
     on_stderr => sub ($child, $chunk) { ... },  # optional
@@ -79,6 +79,31 @@ but uses a per-loop cached helper for minimal overhead.
 
     data => $any,                # optional: stored on the child handle
   );
+
+=head2 cmd
+
+Exec list form. No shell is involved.
+
+  cmd => [ $path, @argv ]
+
+This becomes:
+
+  exec { $path } $path, @argv
+
+=head2 child
+
+Advanced form. Provide a callback that runs in the child process after fork(),
+after Fork has already set up any requested stdio redirections.
+
+  child => sub {
+    # runs in the child; typically calls exec()
+    exec $path, @argv;
+  }
+
+Exactly one of C<cmd> or C<child> must be provided.
+
+If the callback throws an exception or returns normally, the child exits with
+status 127. (If it calls C<exec>, it never returns.)
 
 =head1 EXIT AND DRAIN SEMANTICS
 
@@ -136,8 +161,21 @@ sub new ($class, %args) {
 sub loop ($self) { return $self->{loop} }
 
 sub spawn ($self, %spec) {
-  my $cmd = delete $spec{cmd};
-  croak "cmd is required" if !$cmd || ref($cmd) ne 'ARRAY' || !@$cmd;
+  my $cmd   = delete $spec{cmd};
+  my $child = delete $spec{child};
+
+  if (defined $cmd && defined $child) {
+    croak "provide exactly one of cmd or child";
+  }
+  if (!defined $cmd && !defined $child) {
+    croak "cmd or child is required";
+  }
+
+  if (defined $cmd) {
+    croak "cmd must be an arrayref" if ref($cmd) ne 'ARRAY' || !@$cmd;
+  } else {
+    croak "child must be a coderef" if ref($child) ne 'CODE';
+  }
 
   my $on_stdout = delete $spec{on_stdout};
   my $on_stderr = delete $spec{on_stderr};
@@ -178,7 +216,9 @@ sub spawn ($self, %spec) {
   croak "fork: $!" if !defined $pid;
 
   if ($pid == 0) {
-    eval {
+    # ---- child ----
+    # No Perl teardown / END blocks if we fail; always _exit.
+    my $ok = eval {
       if (defined $stdin) {
         close($in_w);
         POSIX::dup2(fileno($in_r), fileno(*STDIN)) or die "dup2(stdin): $!";
@@ -196,18 +236,31 @@ sub spawn ($self, %spec) {
       close($out_w) if $capture_stdout;
       close($err_w) if $capture_stderr;
 
-      exec {$cmd->[0]} @$cmd;
-      die "exec($cmd->[0]): $!";
+      if (defined $cmd) {
+        exec {$cmd->[0]} @$cmd;
+        die "exec($cmd->[0]): $!";
+      } else {
+        $child->();     # typically calls exec()
+        die "child callback returned";
+      }
     };
-
+    if (!$ok) {
+      my $err = $@;
+      # Best-effort message; goes to child stderr (possibly captured).
+      if (defined $err && $err ne '') {
+        $err =~ s/\s+\z/\n/;
+        syswrite(*STDERR, "Linux::Event::Fork child error: $err");
+      }
+    }
     POSIX::_exit(127);
   }
 
+  # ---- parent ----
   close($out_w) if $capture_stdout;
   close($err_w) if $capture_stderr;
   close($in_r)  if defined $stdin;
 
-  my $child = Linux::Event::Fork::Child->_new(
+  my $handle = Linux::Event::Fork::Child->_new(
     loop => $self->{loop},
     pid  => $pid,
 
@@ -226,12 +279,12 @@ sub spawn ($self, %spec) {
   );
 
   if (defined $stdin) {
-    $child->stdin_write($stdin);
-    $child->close_stdin;
+    $handle->stdin_write($stdin);
+    $handle->close_stdin;
   }
 
-  $child->_arm;
-  return $child;
+  $handle->_arm;
+  return $handle;
 }
 
 sub _set_nonblock ($fh) {

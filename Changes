@@ -2,3 +2,5 @@ Revision history for Linux-Event-Fork
 
 0.001  2026-02-15
   - Initial release (spawn + optional stdout/stderr capture + exit object)
+  - Fix: correct initial EOF flags so drain-first cannot short-circuit before pipe EOF
+  - Add: child => sub { ... } advanced spawn form (runs in child after stdio plumbing; typically exec)
