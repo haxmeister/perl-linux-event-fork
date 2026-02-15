@@ -1,0 +1,4 @@
+Revision history for Linux-Event-Fork
+
+0.001  2026-02-15
+  - Initial release (spawn + optional stdout/stderr capture + exit object)
