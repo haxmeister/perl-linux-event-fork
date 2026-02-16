@@ -13,9 +13,9 @@ use Linux::Event::Fork;
 #   - drain-first teardown stability under load
 #
 # Expected:
-#   - some children exit normally
-#   - some children get timed out (TERM)
 #   - loop stops cleanly after all children complete
+#   - some children time out (timeout callback fires)
+#   - child installs a TERM handler that exits 0, so a timed-out child may still be exit_ok
 
 my $loop = Linux::Event->new;
 
@@ -23,17 +23,27 @@ my $N = $ENV{N} // 200;
 my $TIMEOUT = $ENV{TIMEOUT} // 0.02;
 
 my $done = 0;
-my $timed = 0;
-my $ok = 0;
+
+my $timeout_fired = 0;          # count of timeout callbacks observed
+my $exit_ok = 0;                # exit status == 0
+my $exit_ok_timeout = 0;        # exit_ok where timeout fired
+my $exit_ok_normal = 0;         # exit_ok where no timeout fired
+
+my %timed_by_pid;
 
 for my $i (1..$N) {
   $loop->fork(
     tag => "job:$i",
+
     timeout => $TIMEOUT,
-    on_timeout => sub ($child) { $timed++ },
+    on_timeout => sub ($child) {
+      $timeout_fired++;
+      $timed_by_pid{ $child->pid } = 1;
+    },
 
     child => sub {
       $SIG{TERM} = sub { exit 0 };
+
       # Half the time, sleep longer than timeout.
       if ($i % 2 == 0) {
         select(undef, undef, undef, $TIMEOUT * 4);
@@ -45,7 +55,16 @@ for my $i (1..$N) {
 
     on_exit => sub ($child, $exit) {
       $done++;
-      $ok++ if $exit->exited && $exit->code == 0;
+
+      if ($exit->exited && $exit->code == 0) {
+        $exit_ok++;
+        if ($timed_by_pid{ $child->pid }) {
+          $exit_ok_timeout++;
+        } else {
+          $exit_ok_normal++;
+        }
+      }
+
       $loop->stop if $done == $N;
     },
   );
@@ -54,6 +73,8 @@ for my $i (1..$N) {
 $loop->run;
 
 print "DONE\n";
-print "  N        = $N\n";
-print "  ok       = $ok\n";
-print "  timedout = $timed\n";
+print "  N              = $N\n";
+print "  timeout_fired   = $timeout_fired\n";
+print "  exit_ok         = $exit_ok\n";
+print "  exit_ok_normal  = $exit_ok_normal\n";
+print "  exit_ok_timeout = $exit_ok_timeout\n";

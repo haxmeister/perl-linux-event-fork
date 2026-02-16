@@ -3,7 +3,7 @@ use v5.36;
 use strict;
 use warnings;
 
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Carp qw(croak);
 use POSIX ();
@@ -50,10 +50,9 @@ sub spawn ($self, %spec) {
     croak "child must be a coderef" if ref($child) ne 'CODE';
   }
 
-  my $on_stdout = delete $spec{on_stdout};
-  my $on_stderr = delete $spec{on_stderr};
-  my $on_exit   = delete $spec{on_exit};
-
+  my $on_stdout  = delete $spec{on_stdout};
+  my $on_stderr  = delete $spec{on_stderr};
+  my $on_exit    = delete $spec{on_exit};
   my $on_timeout = delete $spec{on_timeout};
   my $timeout    = delete $spec{timeout};
 
@@ -129,20 +128,25 @@ sub spawn ($self, %spec) {
       close($out_w) if $capture_stdout;
       close($err_w) if $capture_stderr;
 
-      if (defined $umask) { umask($umask) or die "umask($umask): $!" }
-      if (defined $cwd)   { chdir($cwd) or die "chdir($cwd): $!" }
+      if (defined $umask) {
+        umask($umask) or die "umask($umask): $!";
+      }
+      if (defined $cwd) {
+        chdir($cwd) or die "chdir($cwd): $!";
+      }
 
       if ($clear_env) { %ENV = () }
       if (defined $env) { %ENV = (%ENV, %$env) }
 
       if (defined $cmd) {
-        exec {$cmd->[0]} @$cmd;
+        exec { $cmd->[0] } @$cmd;
         die "exec($cmd->[0]): $!";
       } else {
         $child->();
         die "child callback returned";
       }
     };
+
     if (!$ok) {
       my $err = $@;
       if (defined $err && $err ne '') {
@@ -150,6 +154,7 @@ sub spawn ($self, %spec) {
         syswrite(*STDERR, "Linux::Event::Fork child error: $err");
       }
     }
+
     POSIX::_exit(127);
   }
 
@@ -199,3 +204,182 @@ sub _set_nonblock ($fh) {
 }
 
 1;
+
+__END__
+
+=head1 NAME
+
+Linux::Event::Fork - Minimal async child spawning on top of Linux::Event
+
+=head1 SYNOPSIS
+
+  use v5.36;
+  use Linux::Event;
+  use Linux::Event::Fork;   # installs $loop->fork
+
+  my $loop = Linux::Event->new;
+
+  $loop->fork(
+    tag => "job:42",
+
+    cmd => [ $^X, '-we', 'print "hello\n"; exit 0' ],
+
+    on_stdout => sub ($child, $chunk) {
+      print "[stdout] $chunk";
+    },
+
+    on_exit => sub ($child, $exit) {
+      say "pid=" . $child->pid . " code=" . ($exit->exited ? $exit->code : 'n/a');
+      $loop->stop;
+    },
+  );
+
+  $loop->run;
+
+=head1 DESCRIPTION
+
+B<Linux::Event::Fork> is a small policy-layer helper built on top of
+L<Linux::Event>. It installs an opt-in method C<< $loop->fork(...) >> into
+C<Linux::Event::Loop>.
+
+It uses only public primitives:
+
+=over 4
+
+=item * C<< $loop->watch(...) >> for pipes
+
+=item * C<< $loop->pid(...) >> for exit observation
+
+=item * C<< $loop->after(...) >> for timeouts
+
+=back
+
+=head2 Constraints
+
+=over 4
+
+=item * No restarts/backoff.
+
+=item * No hidden ownership of user resources.
+
+=item * Explicit, idempotent teardown.
+
+=item * Drain-first: C<on_exit> fires only after exit is observed and captured pipes reach EOF.
+
+=back
+
+=head1 SPAWN ARGUMENTS
+
+Exactly one of C<cmd> or C<child> is required.
+
+=head2 cmd
+
+  cmd => [ $program, @argv ]
+
+Uses C<exec>. If exec fails, the child exits 127 and writes a short diagnostic to STDERR.
+
+=head2 child
+
+  child => sub { ... }
+
+Runs a Perl callback in the child after stdio plumbing and setup options are applied.
+Typically you call C<exec> from inside the callback.
+
+If the callback throws an exception or returns normally, the child exits 127 and writes
+a best-effort diagnostic to STDERR.
+
+=head2 Output capture
+
+  on_stdout => sub ($child, $chunk) { ... }
+  on_stderr => sub ($child, $chunk) { ... }
+
+C<$chunk> is raw bytes from C<sysread()>; it is B<not> line-oriented and may split
+arbitrarily. Buffer in user code if you want line/message framing.
+
+By default, stdout/stderr pipes are only created if their callback is provided.
+
+Override with:
+
+  capture_stdout => 1|0
+  capture_stderr => 1|0
+
+Enabling capture without a callback drains and discards output so the child cannot
+block on a full pipe.
+
+=head2 Exit
+
+  on_exit => sub ($child, $exit) { ... }
+
+C<$exit> is a L<Linux::Event::Fork::Exit> object.
+
+=head2 Stdin
+
+=head3 One-shot stdin bytes
+
+  stdin => $bytes
+
+Creates a pipe, writes the bytes, and closes stdin.
+
+=head3 Streaming stdin with backpressure
+
+  stdin_pipe => 1
+
+Creates a pipe and keeps it open. Stream with:
+
+  $child->stdin_write($bytes);
+  $child->close_stdin;
+
+Writes are non-blocking and backpressure-aware.
+
+SIGPIPE is ignored during writes and EPIPE is treated as a normal close condition.
+
+=head2 Minimal timeout
+
+  timeout    => $seconds,
+  on_timeout => sub ($child) { ... },   # optional
+
+When the timer fires and the child has not yet exited:
+
+=over 4
+
+=item 1. Calls C<on_timeout> (if provided)
+
+=item 2. Sends TERM to the child once
+
+=back
+
+No escalation and no restart policy.
+
+=head2 Child setup options
+
+Applied in the child after stdio plumbing and before exec/callback:
+
+  cwd       => "/path"
+  umask     => 027
+  env       => { KEY => "value", ... }   # overlays onto inherited %ENV
+  clear_env => 1                         # start with empty %ENV before overlay
+
+=head2 Metadata
+
+  tag  => $label
+  data => $opaque
+
+Both are stored on the returned handle.
+
+=head1 RETURN VALUE
+
+Returns a L<Linux::Event::Fork::Child> handle.
+
+=head1 SEE ALSO
+
+L<Linux::Event>, L<Linux::Event::Fork::Child>, L<Linux::Event::Fork::Exit>
+
+=head1 AUTHOR
+
+Joshua S. Day (HAX)
+
+=head1 LICENSE
+
+Same terms as Perl itself.
+
+=cut

@@ -10,7 +10,7 @@ use Linux::Event::Fork;
 # This stresses:
 #   - backpressure-aware stdin streaming queue
 #   - timeout firing while stdin is still being written
-#   - teardown stability (timer cancel, watchers, fds) after EPIPE
+#   - teardown stability (timer cancel, watchers, fds) after EPIPE/SIGPIPE conditions
 #
 # Expected:
 #   - timeout fires

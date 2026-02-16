@@ -3,7 +3,7 @@ use v5.36;
 use strict;
 use warnings;
 
-our $VERSION = '0.001';
+our $VERSION = '0.002';
 
 use Carp qw(croak);
 use Errno qw(EAGAIN EINTR EPIPE);
@@ -203,7 +203,6 @@ sub _on_timeout ($self) {
   }
 
   $self->kill('TERM');
-
   return;
 }
 
@@ -233,8 +232,6 @@ sub _drain_stdin ($self) {
 
   my $wrote_total = 0;
 
-  # Writing to a closed pipe can raise SIGPIPE, which would terminate the process.
-  # Ignore SIGPIPE and treat EPIPE as a normal "stop writing" condition.
   local $SIG{PIPE} = 'IGNORE';
 
   while ($off < $len) {
@@ -335,3 +332,81 @@ sub _maybe_finish ($self) {
 }
 
 1;
+
+__END__
+
+=head1 NAME
+
+Linux::Event::Fork::Child - Child handle returned by Linux::Event::Fork
+
+=head1 SYNOPSIS
+
+  my $child = $loop->fork(
+    tag => "job:42",
+    cmd => [ "sleep", "10" ],
+    timeout => 2,
+    on_timeout => sub ($child) {
+      warn "timeout: " . ($child->tag // $child->pid);
+    },
+    on_exit => sub ($child, $exit) {
+      $loop->stop;
+    },
+  );
+
+  $child->stdin_write($bytes);
+  $child->close_stdin;
+
+  $child->cancel; # idempotent teardown
+
+=head1 DESCRIPTION
+
+Child handles are returned by L<Linux::Event::Fork> and represent exactly one spawned
+child plus any internal watchers/subscriptions created for it.
+
+=head1 METHODS
+
+=head2 pid
+
+Returns the child PID.
+
+=head2 tag
+
+Returns the optional label from spawn time.
+
+=head2 data
+
+Returns the opaque user data from spawn time.
+
+=head2 kill
+
+  $child->kill('TERM');
+
+Sends a signal to the child.
+
+=head2 stdin_write
+
+Queues bytes to be written to the child's stdin. Writes are non-blocking and
+backpressure-aware. SIGPIPE is ignored during writes; EPIPE is treated as a normal
+close.
+
+=head2 close_stdin
+
+Requests stdin closure after queued bytes are drained.
+
+=head2 cancel
+
+Idempotently cancels watchers/subscriptions and closes owned filehandles.
+
+=head1 SEE ALSO
+
+L<Linux::Event::Fork>, L<Linux::Event::Fork::Exit>
+
+=head1 AUTHOR
+
+Joshua S. Day (HAX)
+
+=head1 LICENSE
+
+Same terms as Perl itself.
+
+=cut

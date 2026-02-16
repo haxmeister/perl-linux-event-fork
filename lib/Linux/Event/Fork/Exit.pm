@@ -3,107 +3,76 @@ use v5.36;
 use strict;
 use warnings;
 
+our $VERSION = '0.002';
+
+use POSIX qw(WIFEXITED WEXITSTATUS WIFSIGNALED WTERMSIG);
+
+# WCOREDUMP is not available/exported on all Perls/platforms.
+# Detect it at compile time and gracefully return 0 when unavailable.
+my $HAS_WCOREDUMP = defined &POSIX::WCOREDUMP ? 1 : 0;
+
+sub new ($class, $status) { return bless { status => $status }, $class }
+sub status   ($self) { return $self->{status} }
+
+sub exited   ($self) { return WIFEXITED($self->{status}) ? 1 : 0 }
+sub code     ($self) { return WEXITSTATUS($self->{status}) }
+
+sub signaled ($self) { return WIFSIGNALED($self->{status}) ? 1 : 0 }
+sub signal   ($self) { return WTERMSIG($self->{status}) }
+
+sub coredump ($self) {
+  return 0 if !$HAS_WCOREDUMP;
+  return POSIX::WCOREDUMP($self->{status}) ? 1 : 0;
+}
+
+1;
+
+__END__
+
 =head1 NAME
 
-Linux::Event::Fork::Exit - Structured child-exit result (no POSIX macros required)
+Linux::Event::Fork::Exit - Exit-status helper object (abstracts POSIX wait macros)
 
 =head1 SYNOPSIS
 
   on_exit => sub ($child, $exit) {
     if ($exit->exited) {
-      say "code=" . $exit->code;
+      say "exit code: " . $exit->code;
     } elsif ($exit->signaled) {
-      say "signal=" . $exit->signal;
+      say "signal: " . $exit->signal;
     }
-  };
+  }
 
 =head1 DESCRIPTION
 
-C<Linux::Event> exposes raw C<waitpid()> status integers from pidfd observation.
-This class provides a stable, documented interface for interpreting that status
-without requiring users to import POSIX macros.
+Wraps the raw wait status integer and exposes methods so user code does not need to
+use POSIX macros like C<WIFEXITED>, C<WEXITSTATUS>, C<WIFSIGNALED>, or C<WTERMSIG>.
 
 =head1 METHODS
 
-=head2 raw
+=head2 status
 
-  my $raw = $exit->raw;
+Raw wait status integer.
 
-The raw status integer (or undef).
+=head2 exited / code
 
-=head2 exited, code
+Normal exit and exit code (0..255).
 
-  if ($exit->exited) { say $exit->code }
+=head2 signaled / signal
 
-True when the process exited normally. C<code> is the exit code (0..255).
+Terminated by signal and signal number.
 
-=head2 signaled, signal, core_dump
+=head2 coredump
 
-  if ($exit->signaled) { say $exit->signal }
+True if a core dump occurred (when available on this Perl/platform). If the
+platform does not provide C<WCOREDUMP>, this method returns false.
 
-True when the process terminated by signal. C<core_dump> reports whether a core
-dump flag is present.
+=head1 AUTHOR
 
-=head2 stopped, stop_signal
+Joshua S. Day (HAX)
 
-These are provided for completeness but are not typically expected when pidfd is
-configured for exit observation.
+=head1 LICENSE
 
-=head1 NOTE ON STABILITY
-
-This API is intended to remain stable even if internal implementation details change.
+Same terms as Perl itself.
 
 =cut
-
-sub new ($class, $status) {
-  return bless { raw => $status }, $class;
-}
-
-sub raw ($self) { return $self->{raw} }
-
-sub exited ($self) {
-  my $st = $self->{raw};
-  return 0 if !defined $st;
-  return (($st & 0x7f) == 0) ? 1 : 0;
-}
-
-sub code ($self) {
-  return undef if !$self->exited;
-  my $st = $self->{raw};
-  return ($st >> 8) & 0xff;
-}
-
-sub signaled ($self) {
-  my $st = $self->{raw};
-  return 0 if !defined $st;
-  my $sig = $st & 0x7f;
-  return 0 if $sig == 0;       # normal exit
-  return 0 if $sig == 0x7f;    # stopped/continued (not expected under WEXITED)
-  return 1;
-}
-
-sub signal ($self) {
-  return undef if !$self->signaled;
-  my $st = $self->{raw};
-  return $st & 0x7f;
-}
-
-sub core_dump ($self) {
-  return 0 if !$self->signaled;
-  my $st = $self->{raw};
-  return ($st & 0x80) ? 1 : 0;
-}
-
-sub stopped ($self) {
-  my $st = $self->{raw};
-  return 0 if !defined $st;
-  return (($st & 0x7f) == 0x7f) ? 1 : 0;
-}
-
-sub stop_signal ($self) {
-  return undef if !$self->stopped;
-  my $st = $self->{raw};
-  return ($st >> 8) & 0xff;
-}
-
-1;
