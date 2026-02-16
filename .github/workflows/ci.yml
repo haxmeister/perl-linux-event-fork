@@ -9,32 +9,30 @@ permissions:
 
 jobs:
   test:
-    name: Perl ${{ matrix.perl }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Perl ${{ matrix.perl }} (container) on ubuntu-latest
+    runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
         perl: ["5.38", "5.40", "5.42"]
+
+    # Workaround (Feb 2026): shogo82148/actions-setup-perl is intermittently failing
+    # with "failed to verify ..." (attestation verification). To avoid depending on it,
+    # run tests inside official Perl Docker images instead.
+    container:
+      image: perl:${{ matrix.perl }}
 
     steps:
       - uses: actions/checkout@v4
-
-      # NOTE (Feb 2026): shogo82148/actions-setup-perl@v1 is intermittently failing with:
-      #   "failed to verify ... /home/runner/work/_temp/...."
-      # See upstream issue #2481.
-      # Pinning to a known-good tag avoids the regression until upstream resolves it.
-      - name: Set up Perl
-        uses: shogo82148/actions-setup-perl@v1.36.0
-        with:
-          perl-version: ${{ matrix.perl }}
-          distribution: default
 
       - name: Perl version
         run: perl -V
 
       - name: Install dependencies
-        run: cpanm --notest --quiet --installdeps . --with-develop --with-configure
+        run: |
+          cpanm --notest --quiet App::cpanminus
+          cpanm --notest --quiet --installdeps . --with-configure --with-develop
 
       - name: Build
         run: perl Makefile.PL && make
