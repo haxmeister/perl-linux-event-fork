@@ -77,6 +77,12 @@ but uses a per-loop cached helper for minimal overhead.
     capture_stdout => 1|0,       # optional (default: true if on_stdout provided)
     capture_stderr => 1|0,       # optional (default: true if on_stderr provided)
 
+    # Child setup options (applied in child after stdio plumbing, before exec/child callback):
+    cwd   => "/tmp",             # optional: chdir in child
+    umask => 027,                # optional: umask in child
+    env   => { FOO => "bar" },   # optional: overlay into %ENV in child
+    clear_env => 1,              # optional: start from empty %ENV before applying env overlay
+
     data => $any,                # optional: stored on the child handle
   );
 
@@ -105,6 +111,42 @@ Exactly one of C<cmd> or C<child> must be provided.
 If the callback throws an exception or returns normally, the child exits with
 status 127. (If it calls C<exec>, it never returns.)
 
+If an exception is thrown (or the callback returns), Fork will write a short
+best-effort diagnostic to STDERR in the child:
+
+  Linux::Event::Fork child error: ...
+
+If you enable stderr capture (via C<on_stderr> or C<capture_stderr>), this
+diagnostic can be observed in the parent.
+
+=head2 cwd
+
+  cwd => "/path"
+
+If provided, Fork calls C<chdir> in the child before exec.
+
+=head2 umask
+
+  umask => 027
+
+If provided, Fork calls C<umask> in the child before exec.
+
+=head2 env and clear_env
+
+  env => { KEY => "value", ... }
+  clear_env => 1
+
+By default, the child inherits the parent's environment.
+
+If C<env> is provided, it is applied as an overlay in the child:
+
+  %ENV = (%ENV, %$env);
+
+If C<clear_env> is true, the child starts from an empty environment:
+
+  %ENV = ();
+  %ENV = (%ENV, %$env);   # if env is also provided
+
 =head1 EXIT AND DRAIN SEMANTICS
 
 This module uses I<drain-first> semantics: C<on_exit> is invoked only after:
@@ -122,18 +164,6 @@ This makes it safe for typical code to stop the loop inside C<on_exit>.
 =head1 CHILD HANDLE
 
 The returned object is a L<Linux::Event::Fork::Child>.
-
-=head1 PERFORMANCE NOTES
-
-This module minimizes hot-path branching by pushing almost all work into:
-
-=over 4
-
-=item * a single sysread loop per readiness notification
-
-=item * direct user callback invocation (no fan-out)
-
-=back
 
 =cut
 
@@ -190,6 +220,17 @@ sub spawn ($self, %spec) {
   my $capture_stderr = delete $spec{capture_stderr};
   my $stdin          = delete $spec{stdin};
 
+  # Child setup options
+  my $cwd       = delete $spec{cwd};
+  my $umask     = delete $spec{umask};
+  my $env       = delete $spec{env};
+  my $clear_env = delete $spec{clear_env};
+
+  croak "cwd must be a string" if defined($cwd) && ref($cwd);
+  croak "umask must be an integer" if defined($umask) && ref($umask);
+  croak "env must be a hashref" if defined($env) && ref($env) ne 'HASH';
+  $clear_env = $clear_env ? 1 : 0 if defined $clear_env;
+
   croak "unknown args: " . join(", ", sort keys %spec) if %spec;
 
   $capture_stdout = defined($capture_stdout) ? ($capture_stdout ? 1 : 0) : (defined($on_stdout) ? 1 : 0);
@@ -236,6 +277,21 @@ sub spawn ($self, %spec) {
       close($out_w) if $capture_stdout;
       close($err_w) if $capture_stderr;
 
+      if (defined $umask) {
+        umask($umask) or die "umask($umask): $!";
+      }
+
+      if (defined $cwd) {
+        chdir($cwd) or die "chdir($cwd): $!";
+      }
+
+      if ($clear_env) {
+        %ENV = ();
+      }
+      if (defined $env) {
+        %ENV = (%ENV, %$env);
+      }
+
       if (defined $cmd) {
         exec {$cmd->[0]} @$cmd;
         die "exec($cmd->[0]): $!";
@@ -246,7 +302,6 @@ sub spawn ($self, %spec) {
     };
     if (!$ok) {
       my $err = $@;
-      # Best-effort message; goes to child stderr (possibly captured).
       if (defined $err && $err ne '') {
         $err =~ s/\s+\z/\n/;
         syswrite(*STDERR, "Linux::Event::Fork child error: $err");

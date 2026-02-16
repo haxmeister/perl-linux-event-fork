@@ -4,3 +4,5 @@ Revision history for Linux-Event-Fork
   - Initial release (spawn + optional stdout/stderr capture + exit object)
   - Fix: correct initial EOF flags so drain-first cannot short-circuit before pipe EOF
   - Add: child => sub { ... } advanced spawn form (runs in child after stdio plumbing; typically exec)
+  - Tests: capture overrides (capture_*), drain without callbacks, and child callback failure (exit 127)
+  - Add: child setup options cwd, umask, env overlay, and clear_env
