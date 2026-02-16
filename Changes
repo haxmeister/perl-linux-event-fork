@@ -6,3 +6,5 @@ Revision history for Linux-Event-Fork
   - Add: child => sub { ... } advanced spawn form (runs in child after stdio plumbing; typically exec)
   - Tests: capture overrides (capture_*), drain without callbacks, and child callback failure (exit 127)
   - Add: child setup options cwd, umask, env overlay, and clear_env
+  - Add: stdin streaming with backpressure-aware non-blocking writes (stdin_write / close_stdin)
+  - Fix: add stdin_pipe => 1 to explicitly request a stdin pipe for post-spawn streaming

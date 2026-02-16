@@ -15,159 +15,12 @@ use Linux::Event::Fork::Child ();
 
 Linux::Event::Fork - Policy-layer async child spawning for Linux::Event (installs $loop->fork)
 
-=head1 SYNOPSIS
-
-  use v5.36;
-  use Linux::Event;
-  use Linux::Event::Fork;  # installs $loop->fork (Option B)
-
-  my $loop = Linux::Event->new;
-
-  my $child = $loop->fork(
-    cmd => [ $^X, '-we', 'print "hi\n"; exit 0' ],
-
-    on_stdout => sub ($child, $chunk) { ... },
-
-    on_exit => sub ($child, $exit) {
-      if ($exit->exited) { say $exit->code }
-      $loop->stop;
-    },
-  );
-
-  $loop->run;
-
 =head1 DESCRIPTION
 
-This distribution is intentionally a policy layer built on L<Linux::Event>'s public
-primitives:
-
-=over 4
-
-=item * C<< $loop->watch(...) >> to watch pipes for stdout/stderr capture
-
-=item * C<< $loop->pid(...) >> (pidfd) to observe process exit
-
-=back
-
-Core L<Linux::Event> remains unchanged.
-
-=head1 LOOP METHOD INSTALLATION (OPTION B)
-
-When you C<use Linux::Event::Fork>, this module installs C<< $loop->fork(...) >>
-into C<Linux::Event::Loop>. The method is not present unless this distribution is loaded.
-
-The installed method is equivalent to:
-
-  Linux::Event::Fork->new(loop => $loop)->spawn(...)
-
-but uses a per-loop cached helper for minimal overhead.
-
-=head1 SPAWN API
-
-  my $child = $loop->fork(
-    cmd => [ $path, @argv ],     # OR: child => sub { ... } (see below)
-
-    on_stdout => sub ($child, $chunk) { ... },  # optional
-    on_stderr => sub ($child, $chunk) { ... },  # optional
-
-    on_exit   => sub ($child, $exit)  { ... },  # optional
-
-    stdin => $bytes,             # optional: write then close
-
-    capture_stdout => 1|0,       # optional (default: true if on_stdout provided)
-    capture_stderr => 1|0,       # optional (default: true if on_stderr provided)
-
-    # Child setup options (applied in child after stdio plumbing, before exec/child callback):
-    cwd   => "/tmp",             # optional: chdir in child
-    umask => 027,                # optional: umask in child
-    env   => { FOO => "bar" },   # optional: overlay into %ENV in child
-    clear_env => 1,              # optional: start from empty %ENV before applying env overlay
-
-    data => $any,                # optional: stored on the child handle
-  );
-
-=head2 cmd
-
-Exec list form. No shell is involved.
-
-  cmd => [ $path, @argv ]
-
-This becomes:
-
-  exec { $path } $path, @argv
-
-=head2 child
-
-Advanced form. Provide a callback that runs in the child process after fork(),
-after Fork has already set up any requested stdio redirections.
-
-  child => sub {
-    # runs in the child; typically calls exec()
-    exec $path, @argv;
-  }
-
-Exactly one of C<cmd> or C<child> must be provided.
-
-If the callback throws an exception or returns normally, the child exits with
-status 127. (If it calls C<exec>, it never returns.)
-
-If an exception is thrown (or the callback returns), Fork will write a short
-best-effort diagnostic to STDERR in the child:
-
-  Linux::Event::Fork child error: ...
-
-If you enable stderr capture (via C<on_stderr> or C<capture_stderr>), this
-diagnostic can be observed in the parent.
-
-=head2 cwd
-
-  cwd => "/path"
-
-If provided, Fork calls C<chdir> in the child before exec.
-
-=head2 umask
-
-  umask => 027
-
-If provided, Fork calls C<umask> in the child before exec.
-
-=head2 env and clear_env
-
-  env => { KEY => "value", ... }
-  clear_env => 1
-
-By default, the child inherits the parent's environment.
-
-If C<env> is provided, it is applied as an overlay in the child:
-
-  %ENV = (%ENV, %$env);
-
-If C<clear_env> is true, the child starts from an empty environment:
-
-  %ENV = ();
-  %ENV = (%ENV, %$env);   # if env is also provided
-
-=head1 EXIT AND DRAIN SEMANTICS
-
-This module uses I<drain-first> semantics: C<on_exit> is invoked only after:
-
-=over 4
-
-=item * the child exit is observed via pidfd, and
-
-=item * captured stdout/stderr (if any) have reached EOF
-
-=back
-
-This makes it safe for typical code to stop the loop inside C<on_exit>.
-
-=head1 CHILD HANDLE
-
-The returned object is a L<Linux::Event::Fork::Child>.
+See README and the POD for usage. This module installs C<< $loop->fork(...) >> (Option B).
 
 =cut
 
-# Option B: install $loop->fork only when this module is loaded.
 sub import ($class, @args) {
   no strict 'refs';
   no warnings 'redefine';
@@ -218,7 +71,14 @@ sub spawn ($self, %spec) {
 
   my $capture_stdout = delete $spec{capture_stdout};
   my $capture_stderr = delete $spec{capture_stderr};
-  my $stdin          = delete $spec{stdin};
+
+  # Stdin options:
+  # - stdin => $bytes: create pipe, write bytes, and (unless stdin_pipe) close immediately.
+  # - stdin_pipe => 1: create pipe and keep it open for streaming via $child->stdin_write().
+  my $stdin      = delete $spec{stdin};
+  my $stdin_pipe = delete $spec{stdin_pipe};
+
+  $stdin_pipe = $stdin_pipe ? 1 : 0 if defined $stdin_pipe;
 
   # Child setup options
   my $cwd       = delete $spec{cwd};
@@ -248,7 +108,9 @@ sub spawn ($self, %spec) {
     pipe($err_r, $err_w) or croak "pipe(stderr): $!";
     _set_nonblock($err_r);
   }
-  if (defined $stdin) {
+
+  my $want_stdin = (defined($stdin) || $stdin_pipe) ? 1 : 0;
+  if ($want_stdin) {
     pipe($in_r, $in_w) or croak "pipe(stdin): $!";
     _set_nonblock($in_w); # parent writes
   }
@@ -257,10 +119,8 @@ sub spawn ($self, %spec) {
   croak "fork: $!" if !defined $pid;
 
   if ($pid == 0) {
-    # ---- child ----
-    # No Perl teardown / END blocks if we fail; always _exit.
     my $ok = eval {
-      if (defined $stdin) {
+      if ($want_stdin) {
         close($in_w);
         POSIX::dup2(fileno($in_r), fileno(*STDIN)) or die "dup2(stdin): $!";
       }
@@ -273,7 +133,7 @@ sub spawn ($self, %spec) {
         POSIX::dup2(fileno($err_w), fileno(*STDERR)) or die "dup2(stderr): $!";
       }
 
-      close($in_r)  if defined $stdin;
+      close($in_r)  if $want_stdin;
       close($out_w) if $capture_stdout;
       close($err_w) if $capture_stderr;
 
@@ -296,7 +156,7 @@ sub spawn ($self, %spec) {
         exec {$cmd->[0]} @$cmd;
         die "exec($cmd->[0]): $!";
       } else {
-        $child->();     # typically calls exec()
+        $child->();
         die "child callback returned";
       }
     };
@@ -310,10 +170,10 @@ sub spawn ($self, %spec) {
     POSIX::_exit(127);
   }
 
-  # ---- parent ----
+  # parent
   close($out_w) if $capture_stdout;
   close($err_w) if $capture_stderr;
-  close($in_r)  if defined $stdin;
+  close($in_r)  if $want_stdin;
 
   my $handle = Linux::Event::Fork::Child->_new(
     loop => $self->{loop},
@@ -333,9 +193,12 @@ sub spawn ($self, %spec) {
     capture_stderr => $capture_stderr,
   );
 
-  if (defined $stdin) {
+  if (defined $stdin && $stdin ne '') {
     $handle->stdin_write($stdin);
-    $handle->close_stdin;
+  }
+
+  if (defined $stdin && !$stdin_pipe) {
+    $handle->close_stdin;  # auto-close only in the "stdin bytes" mode
   }
 
   $handle->_arm;
