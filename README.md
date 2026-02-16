@@ -26,3 +26,24 @@ If it occurs, you can fix CI by either:
 3. Switching to `actions/setup-perl` alternative
 
 This does not affect CPAN builds.
+
+## Controlled parallelism + drain
+
+```perl
+use Linux::Event;
+use Linux::Event::Fork max_children => 4;
+
+my $loop = Linux::Event->new;
+
+for (1..100) {
+  $loop->fork(cmd => [ $^X, '-we', 'print "hi\n"; exit 0' ]);
+}
+
+$loop->fork_helper->drain(on_done => sub ($fork) {
+  $loop->stop;
+});
+
+$loop->run;
+```
+
+See `examples/20_bounded_parallelism_with_drain.pl`.

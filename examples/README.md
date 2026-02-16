@@ -59,3 +59,7 @@ perl -Ilib examples/91_stress_stdin_with_timeout.pl
 TIMEOUT=0.03 perl -Ilib examples/91_stress_stdin_with_timeout.pl
 MB=20 TIMEOUT=0.05 perl -Ilib examples/91_stress_stdin_with_timeout.pl
 ```
+
+## 20_bounded_parallelism_with_drain.pl
+
+Demonstrates `max_children` (controlled parallelism) and `drain()` to stop the loop when all queued work has finished.
