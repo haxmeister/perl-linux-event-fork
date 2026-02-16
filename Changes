@@ -1,5 +1,17 @@
 Revision history for Linux-Event-Fork
 
+0.003  2026-02-15
+
+    * Add full POD documentation
+    * Add README with CI badge
+    * Fix WCOREDUMP portability issue
+    * Declare proper runtime prerequisites (Linux::Event, Linux::FD::Pid)
+    * Add timeout support
+    * Add stdin streaming
+    * Add tag attribute
+    * Add stress test examples
+    * Harden CI workflow (container-based)
+
 0.002  2026-02-15
   - Documentation pass: comprehensive POD for Fork/Child/Exit and refreshed README.md
   - Version bump for CPAN release
