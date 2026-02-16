@@ -11,16 +11,6 @@ use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 
 use Linux::Event::Fork::Child ();
 
-=head1 NAME
-
-Linux::Event::Fork - Policy-layer async child spawning for Linux::Event (installs $loop->fork)
-
-=head1 DESCRIPTION
-
-See README and the POD for usage. This module installs C<< $loop->fork(...) >> (Option B).
-
-=cut
-
 sub import ($class, @args) {
   no strict 'refs';
   no warnings 'redefine';
@@ -63,24 +53,26 @@ sub spawn ($self, %spec) {
   my $on_stdout = delete $spec{on_stdout};
   my $on_stderr = delete $spec{on_stderr};
   my $on_exit   = delete $spec{on_exit};
-  my $data      = delete $spec{data};
 
-  croak "on_stdout must be a coderef" if defined($on_stdout) && ref($on_stdout) ne 'CODE';
-  croak "on_stderr must be a coderef" if defined($on_stderr) && ref($on_stderr) ne 'CODE';
-  croak "on_exit must be a coderef"   if defined($on_exit)   && ref($on_exit)   ne 'CODE';
+  my $on_timeout = delete $spec{on_timeout};
+  my $timeout    = delete $spec{timeout};
+
+  my $tag  = delete $spec{tag};
+  my $data = delete $spec{data};
+
+  croak "on_stdout must be a coderef"  if defined($on_stdout)  && ref($on_stdout)  ne 'CODE';
+  croak "on_stderr must be a coderef"  if defined($on_stderr)  && ref($on_stderr)  ne 'CODE';
+  croak "on_exit must be a coderef"    if defined($on_exit)    && ref($on_exit)    ne 'CODE';
+  croak "on_timeout must be a coderef" if defined($on_timeout) && ref($on_timeout) ne 'CODE';
+  croak "timeout must be numeric seconds" if defined($timeout) && ref($timeout);
 
   my $capture_stdout = delete $spec{capture_stdout};
   my $capture_stderr = delete $spec{capture_stderr};
 
-  # Stdin options:
-  # - stdin => $bytes: create pipe, write bytes, and (unless stdin_pipe) close immediately.
-  # - stdin_pipe => 1: create pipe and keep it open for streaming via $child->stdin_write().
   my $stdin      = delete $spec{stdin};
   my $stdin_pipe = delete $spec{stdin_pipe};
-
   $stdin_pipe = $stdin_pipe ? 1 : 0 if defined $stdin_pipe;
 
-  # Child setup options
   my $cwd       = delete $spec{cwd};
   my $umask     = delete $spec{umask};
   my $env       = delete $spec{env};
@@ -112,7 +104,7 @@ sub spawn ($self, %spec) {
   my $want_stdin = (defined($stdin) || $stdin_pipe) ? 1 : 0;
   if ($want_stdin) {
     pipe($in_r, $in_w) or croak "pipe(stdin): $!";
-    _set_nonblock($in_w); # parent writes
+    _set_nonblock($in_w);
   }
 
   my $pid = fork();
@@ -137,20 +129,11 @@ sub spawn ($self, %spec) {
       close($out_w) if $capture_stdout;
       close($err_w) if $capture_stderr;
 
-      if (defined $umask) {
-        umask($umask) or die "umask($umask): $!";
-      }
+      if (defined $umask) { umask($umask) or die "umask($umask): $!" }
+      if (defined $cwd)   { chdir($cwd) or die "chdir($cwd): $!" }
 
-      if (defined $cwd) {
-        chdir($cwd) or die "chdir($cwd): $!";
-      }
-
-      if ($clear_env) {
-        %ENV = ();
-      }
-      if (defined $env) {
-        %ENV = (%ENV, %$env);
-      }
+      if ($clear_env) { %ENV = () }
+      if (defined $env) { %ENV = (%ENV, %$env) }
 
       if (defined $cmd) {
         exec {$cmd->[0]} @$cmd;
@@ -170,7 +153,6 @@ sub spawn ($self, %spec) {
     POSIX::_exit(127);
   }
 
-  # parent
   close($out_w) if $capture_stdout;
   close($err_w) if $capture_stderr;
   close($in_r)  if $want_stdin;
@@ -178,6 +160,9 @@ sub spawn ($self, %spec) {
   my $handle = Linux::Event::Fork::Child->_new(
     loop => $self->{loop},
     pid  => $pid,
+
+    tag  => $tag,
+    data => $data,
 
     out_r => $out_r,
     err_r => $err_r,
@@ -187,7 +172,8 @@ sub spawn ($self, %spec) {
     on_stderr => $on_stderr,
     on_exit   => $on_exit,
 
-    data => $data,
+    timeout_s  => $timeout,
+    on_timeout => $on_timeout,
 
     capture_stdout => $capture_stdout,
     capture_stderr => $capture_stderr,
@@ -196,9 +182,8 @@ sub spawn ($self, %spec) {
   if (defined $stdin && $stdin ne '') {
     $handle->stdin_write($stdin);
   }
-
   if (defined $stdin && !$stdin_pipe) {
-    $handle->close_stdin;  # auto-close only in the "stdin bytes" mode
+    $handle->close_stdin;
   }
 
   $handle->_arm;

@@ -8,3 +8,5 @@ Revision history for Linux-Event-Fork
   - Add: child setup options cwd, umask, env overlay, and clear_env
   - Add: stdin streaming with backpressure-aware non-blocking writes (stdin_write / close_stdin)
   - Fix: add stdin_pipe => 1 to explicitly request a stdin pipe for post-spawn streaming
+  - Add: tag => ... and $child->tag for ergonomic identification
+  - Add: minimal timeout (timeout + on_timeout, sends TERM once)

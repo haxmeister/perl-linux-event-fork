@@ -6,84 +6,17 @@ use warnings;
 our $VERSION = '0.001';
 
 use Carp qw(croak);
-use Errno qw(EAGAIN EINTR);
+use Errno qw(EAGAIN EINTR EPIPE);
 
 use Linux::Event::Fork::Exit ();
-
-=head1 NAME
-
-Linux::Event::Fork::Child - Child handle returned by Linux::Event::Fork
-
-=head1 SYNOPSIS
-
-  my $child = $loop->fork(...);
-
-  $child->pid;
-  $child->kill('TERM');
-
-  # Streaming stdin:
-  $child->stdin_write($bytes);
-  $child->close_stdin;   # close when all queued bytes are written
-
-  $child->cancel;        # idempotent teardown
-
-=head1 DESCRIPTION
-
-This object represents a single spawned child process, its pid subscription, and
-optional stdout/stderr capture watchers.
-
-=head2 INTERNAL BUT DOCUMENTED
-
-This class is considered an internal implementation detail of the distribution
-and may evolve, but it is fully documented so users can reason about behavior.
-
-In particular, teardown is explicit and idempotent, output callbacks are delivered
-with drain-first semantics, and stdin streaming uses backpressure-aware writes.
-
-=head1 METHODS
-
-=head2 pid
-
-Return the child PID.
-
-=head2 data
-
-Return the user C<data> associated with the handle (if any).
-
-=head2 kill
-
-  $child->kill('TERM');
-
-Send a signal to the child.
-
-=head2 stdin_write
-
-  $child->stdin_write($bytes);
-
-Queue bytes to be written to the child's stdin pipe (if enabled).
-
-This method is non-blocking and may write some bytes immediately if possible.
-Remaining bytes are queued and written later when the pipe becomes writable.
-
-Returns the number of bytes written immediately in this call (which may be 0).
-
-=head2 close_stdin
-
-  $child->close_stdin;
-
-Request that stdin be closed once all queued bytes have been written. If no bytes
-are queued, the stdin pipe is closed immediately.
-
-=head2 cancel
-
-Idempotently cancels watchers/subscriptions and closes owned filehandles.
-
-=cut
 
 sub _new ($class, %args) {
   my $self = bless {
     loop => delete $args{loop},
     pid  => delete $args{pid},
+
+    tag  => delete $args{tag},
+    data => delete $args{data},
 
     out_r => delete $args{out_r},
     err_r => delete $args{err_r},
@@ -93,7 +26,10 @@ sub _new ($class, %args) {
     on_stderr => delete $args{on_stderr},
     on_exit   => delete $args{on_exit},
 
-    data => delete $args{data},
+    timeout_id  => undef,
+    on_timeout  => delete $args{on_timeout},
+    timeout_s   => delete $args{timeout_s},
+    timed_out   => 0,
 
     capture_stdout => delete $args{capture_stdout},
     capture_stderr => delete $args{capture_stderr},
@@ -106,12 +42,11 @@ sub _new ($class, %args) {
     saw_exit => 0,
     exit     => undef,
 
-    eof_out  => 1,  # fixed below
-    eof_err  => 1,  # fixed below
+    eof_out  => 1,
+    eof_err  => 1,
 
-    # stdin streaming/backpressure
-    in_buf  => '',     # pending bytes
-    in_off  => 0,      # offset into in_buf
+    in_buf  => '',
+    in_off  => 0,
     in_close_when_empty => 0,
 
     _canceled => 0,
@@ -119,6 +54,10 @@ sub _new ($class, %args) {
 
   croak "loop missing" if !$self->{loop};
   croak "pid missing"  if !$self->{pid};
+
+  croak "on_timeout must be a coderef" if defined($self->{on_timeout}) && ref($self->{on_timeout}) ne 'CODE';
+  croak "timeout_s must be numeric" if defined($self->{timeout_s}) && ref($self->{timeout_s});
+
   croak "unknown args: " . join(", ", sort keys %args) if %args;
 
   $self->{eof_out} = $self->{out_r} ? 0 : 1;
@@ -129,6 +68,7 @@ sub _new ($class, %args) {
 
 sub pid  ($self) { return $self->{pid} }
 sub loop ($self) { return $self->{loop} }
+sub tag  ($self) { return $self->{tag} }
 sub data ($self) { return $self->{data} }
 
 sub kill ($self, $sig = 'TERM') {
@@ -142,13 +82,10 @@ sub stdin_write ($self, $bytes) {
   return 0 if !defined $bytes || $bytes eq '';
   return 0 if $self->{in_close_when_empty};
 
-  # Append to queue.
   $self->{in_buf} .= $bytes;
 
-  # Try immediate drain.
   my $wrote = $self->_drain_stdin;
 
-  # Ensure write watcher is armed/enabled if we still have pending bytes.
   if (!$self->{_canceled} && $self->{in_w} && length($self->{in_buf}) > $self->{in_off}) {
     if (my $w = $self->{w_in}) {
       $w->enable_write if $w->can('enable_write');
@@ -163,7 +100,6 @@ sub close_stdin ($self) {
 
   my $fh = $self->{in_w} or return 1;
 
-  # If nothing pending, close immediately.
   if (length($self->{in_buf}) <= $self->{in_off}) {
     $self->_close_stdin_now;
     return 1;
@@ -171,7 +107,6 @@ sub close_stdin ($self) {
 
   $self->{in_close_when_empty} = 1;
 
-  # Ensure watcher is enabled if armed.
   if (my $w = $self->{w_in}) {
     $w->enable_write if $w->can('enable_write');
   }
@@ -193,6 +128,10 @@ sub _close_stdin_now ($self) {
 sub cancel ($self) {
   return 0 if $self->{_canceled};
   $self->{_canceled} = 1;
+
+  if (defined(my $tid = delete $self->{timeout_id})) {
+    $self->{loop}->cancel($tid);
+  }
 
   if (my $sub = delete $self->{sub_pid}) { $sub->cancel }
   if (my $w = delete $self->{w_out}) { $w->cancel }
@@ -229,14 +168,12 @@ sub _arm ($self) {
     $self->{eof_err} = 1;
   }
 
-  # stdin write watcher is only needed if we have a stdin pipe.
   if ($self->{in_w}) {
     $self->{w_in} = $loop->watch($self->{in_w},
       write => sub ($loop, $fh, $w) { $self->_on_stdin_writable($w) },
       error => sub ($loop, $fh, $w) { $self->_on_stdin_writable($w) },
     );
 
-    # If nothing pending, disable write to avoid wakeups.
     if (length($self->{in_buf}) <= $self->{in_off}) {
       $self->{w_in}->disable_write if $self->{w_in}->can('disable_write');
     }
@@ -245,6 +182,27 @@ sub _arm ($self) {
   $self->{sub_pid} = $loop->pid($self->{pid}, sub ($loop, $pid2, $status, $ud) {
     $ud->_on_exit($status);
   }, data => $self);
+
+  if (defined $self->{timeout_s} && $self->{timeout_s} > 0) {
+    my $secs = 0 + $self->{timeout_s};
+    $self->{timeout_id} = $loop->after($secs, sub ($loop) { $self->_on_timeout });
+  }
+
+  return;
+}
+
+sub _on_timeout ($self) {
+  return if $self->{_canceled};
+  return if $self->{saw_exit};
+  return if $self->{timed_out};
+
+  $self->{timed_out} = 1;
+
+  if (my $cb = $self->{on_timeout}) {
+    $cb->($self);
+  }
+
+  $self->kill('TERM');
 
   return;
 }
@@ -255,7 +213,6 @@ sub _on_stdin_writable ($self, $w) {
 
   $self->_drain_stdin;
 
-  # If drained fully, disable write until we get more data.
   if ($self->{in_w} && length($self->{in_buf}) <= $self->{in_off}) {
     if ($self->{in_close_when_empty}) {
       $self->_close_stdin_now;
@@ -276,12 +233,19 @@ sub _drain_stdin ($self) {
 
   my $wrote_total = 0;
 
+  # Writing to a closed pipe can raise SIGPIPE, which would terminate the process.
+  # Ignore SIGPIPE and treat EPIPE as a normal "stop writing" condition.
+  local $SIG{PIPE} = 'IGNORE';
+
   while ($off < $len) {
     my $w = syswrite($fh, $buf, $len - $off, $off);
     if (!defined $w) {
       next if $! == EINTR;
       last if $! == EAGAIN;
-      # Treat other errors as fatal: close stdin.
+      if ($! == EPIPE) {
+        $self->_close_stdin_now;
+        return $wrote_total;
+      }
       $self->_close_stdin_now;
       return $wrote_total;
     }
@@ -292,12 +256,10 @@ sub _drain_stdin ($self) {
 
   $self->{in_off} = $off;
 
-  # Compact buffer when fully consumed.
   if ($off >= $len) {
     $self->{in_buf} = '';
     $self->{in_off} = 0;
   } else {
-    # Periodic compaction if offset grows large.
     if ($off > 65536) {
       substr($buf, 0, $off, '');
       $self->{in_buf} = $buf;
@@ -339,7 +301,7 @@ sub _drain_stream ($self, $which) {
     if (!defined $n) {
       next if $! == EINTR;
       last if $! == EAGAIN;
-      $n = 0; # treat other errors as EOF
+      $n = 0;
     }
 
     if ($n == 0) {

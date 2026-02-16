@@ -1,26 +1,24 @@
 # Linux::Event::Fork
 
-Policy-layer async child spawning for **Linux::Event**.
+## Minimal timeout
 
-This distribution stays out of `Linux::Event`'s core: it builds on public primitives
-(`$loop->watch`, `$loop->pid`) and installs an *opt-in* convenience method:
+You can set a simple wall-clock timeout (seconds). When it fires, Fork:
 
-- `use Linux::Event::Fork;` installs `$loop->fork(...)` into `Linux::Event::Loop`
+1) invokes `on_timeout` (if provided), then
+2) sends `TERM` to the child once
 
-## Stdin streaming (backpressure-aware)
-
-To stream to a child's stdin after spawn, enable an explicit stdin pipe:
+Exit handling remains drain-first; `on_exit` still runs only after the child has
+exited and any captured pipes have reached EOF.
 
 ```perl
-my $child = $loop->fork(
-  stdin_pipe => 1,
-  child => sub { ... },
-);
+$loop->fork(
+  timeout => 2.5,
+  on_timeout => sub ($child) {
+    warn "timed out: " . ($child->tag // $child->pid);
+  },
 
-$child->stdin_write($bytes);
-$child->close_stdin;
+  cmd => [ ... ],
+);
 ```
 
-If you instead use `stdin => $bytes` at spawn time, Fork will write those bytes
-and (by default) close stdin immediately.
-
+This is intentionally minimal (no escalation, no restart policy).
