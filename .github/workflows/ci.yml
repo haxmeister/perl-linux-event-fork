@@ -4,32 +4,40 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Perl ${{ matrix.perl }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        perl: ['5.36', '5.38', '5.40', '5.42']
+        os: [ubuntu-latest]
+        perl: ["5.38", "5.40", "5.42"]
+
     steps:
       - uses: actions/checkout@v4
 
+      # NOTE (Feb 2026): shogo82148/actions-setup-perl@v1 is intermittently failing with:
+      #   "failed to verify ... /home/runner/work/_temp/...."
+      # See upstream issue #2481.
+      # Pinning to a known-good tag avoids the regression until upstream resolves it.
       - name: Set up Perl
-        uses: shogo82148/actions-setup-perl@v1
+        uses: shogo82148/actions-setup-perl@v1.36.0
         with:
           perl-version: ${{ matrix.perl }}
           distribution: default
-          enable-modules-cache: true
 
-      - name: Install deps
-        run: |
-          cpanm --quiet --notest --installdeps .
+      - name: Perl version
+        run: perl -V
+
+      - name: Install dependencies
+        run: cpanm --notest --quiet --installdeps . --with-develop --with-configure
 
       - name: Build
-        run: |
-          perl Makefile.PL
-          make
+        run: perl Makefile.PL && make
 
       - name: Test
-        run: |
-          make test
+        run: make test
