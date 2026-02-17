@@ -6,3 +6,9 @@ Revision history for Linux-Event-Fork
   - Add Linux::Event::Fork::Request handle for queued spawns
   - Ensure managed children keep exit observation even if IO is canceled
 
+
+0.005  2026-02-17
+    - Canonicalized introspection API (running, queued)
+    - Removed compile-time max_children idiom
+    - Cleaned and consolidated examples
+    - Tightened POD to match README and stabilized API surface

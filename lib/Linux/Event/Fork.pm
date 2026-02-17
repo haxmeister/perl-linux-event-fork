@@ -3,7 +3,7 @@ use v5.36;
 use strict;
 use warnings;
 
-our $VERSION = '0.004';
+our $VERSION = '0.005';
 
 use Carp qw(croak);
 use POSIX ();
@@ -17,26 +17,40 @@ sub import ($class, %import) {
 
   no strict 'refs';
 
+  # If called again with no options, don't clobber existing installed methods.
+  if (!%import && defined &{"${loop_pkg}::fork"}) {
+    # Still ensure fork_helper exists below.
+  } else {
+    *{"${loop_pkg}::fork"} = sub ($loop, %args) {
+      my $fork = $loop->{_linux_event_fork} ||= $class->new(loop => $loop, %import);
+      return $fork->_spawn(%args) if $fork->can('_spawn');
+      return $fork->spawn(%args);
+    };
+  }
+
   *{"${loop_pkg}::fork_helper"} = sub ($loop, %args) {
-    my $fork = $loop->{_linux_event_fork};
+  # Return the per-loop helper (create on first use).
+  my $fork = $loop->{_linux_event_fork};
 
-    if (!$fork) {
-      $fork = $loop->{_linux_event_fork} = $class->new(loop => $loop, %import, %args);
-      return $fork;
-    }
-
-    if (%args) {
-      $fork->_apply_config(%args);
-    }
-
+  if (!$fork) {
+    $fork = $loop->{_linux_event_fork} = $class->new(loop => $loop, %import, %args);
     return $fork;
-  };
+  }
 
-  *{"${loop_pkg}::fork"} = sub ($loop, %args) {
-    my $fork = $loop->fork_helper;
-    return $fork->_spawn(%args) if $fork->can('_spawn');
-    return $fork->spawn(%args);
-  };
+  # Allow runtime reconfiguration (currently only max_children).
+  if (%args) {
+    my $max_children = delete $args{max_children};
+    if (defined $max_children) {
+      $max_children = 0 if !defined $max_children;
+      croak "max_children must be a non-negative integer" if $max_children !~ /^\\d+$/;
+      $fork->{max_children} = 0 + $max_children;
+    }
+    croak "unknown args: " . join(", ", sort keys %args) if %args;
+  }
+
+  return $fork;
+};
+
 
   return;
 }
@@ -57,19 +71,6 @@ sub new ($class, %args) {
     running => 0,
     queue => [],
   }, $class;
-}
-
-sub _apply_config ($self, %args) {
-  my $max_children = delete $args{max_children};
-
-  croak "unknown args: " . join(", ", sort keys %args) if %args;
-
-  if (defined $max_children) {
-    croak "max_children must be a non-negative integer" if $max_children !~ /^\d+$/;
-    $self->{max_children} = 0 + $max_children;
-  }
-
-  return $self;
 }
 
 sub loop ($self) { return $self->{loop} }
@@ -352,93 +353,162 @@ sub _set_nonblock ($fh) {
 
 1;
 
+
 __END__
 
 =head1 NAME
 
-Linux::Event::Fork - Minimal async child spawning on top of Linux::Event
+Linux::Event::Fork - Async child process management for Linux::Event
 
 =head1 SYNOPSIS
 
   use v5.36;
   use Linux::Event;
-  use Linux::Event::Fork; # configure max_children at runtime
-
-  my $fork = $loop->fork_helper(max_children => 4;   # installs $loop->fork with a limit
+  use Linux::Event::Fork;
 
   my $loop = Linux::Event->new;
 
-  my @jobs = (1..10);
-  my $pending = @jobs;
+  # Optional: configure bounded parallelism
+  my $fork = $loop->fork_helper(max_children => 4);
 
-  for my $n (@jobs) {
-    my $h = $loop->fork(
-      tag => "job:$n",
-      cmd => [ $^X, '-we', 'select(undef,undef,undef,0.05); print "ok\n"; exit 0' ],
+  $loop->fork(
+    cmd => [ $^X, '-we', 'print "hello\n"; exit 0' ],
 
-      on_start => sub ($child) {
-        warn "started pid=" . $child->pid . " tag=" . $child->tag . "\n";
-      },
+    on_stdout => sub ($child, $chunk) {
+      print $chunk;
+    },
 
-      on_exit => sub ($child, $exit) {
-        $pending--;
-        $loop->stop if $pending == 0;
-      },
-    );
-
-    # When max_children is reached, spawn() returns a Request object instead of a Child.
-    if ($h->isa('Linux::Event::Fork::Request')) {
-      warn "queued tag=" . ($h->tag // '') . "\n";
-    }
-  }
+    on_exit => sub ($child, $exit) {
+      print "exit code: " . $exit->code . "\n";
+      $loop->stop;
+    },
+  );
 
   $loop->run;
 
 =head1 DESCRIPTION
 
-B<Linux::Event::Fork> is a small policy-layer helper built on top of
-L<Linux::Event>. It installs an opt-in method C<< $loop->fork(...) >> into
-C<Linux::Event::Loop>.
+B<Linux::Event::Fork> is a small policy layer built on top of
+L<Linux::Event>. It provides nonblocking child process management
+integrated directly into the event loop.
 
-=head2 Controlled parallelism
+Features include:
 
-You can limit how many children are running at once via C<max_children>.
+=over 4
 
-When a limit is in effect and the limit is reached, C<spawn> (and C<< $loop->fork >>)
-will enqueue the request and return a L<Linux::Event::Fork::Request> handle. When a
-slot opens, queued requests are started FIFO.
+=item * Nonblocking stdout/stderr capture
 
-=head1 SPAWN ARGUMENTS
+=item * Streaming stdin
 
-All previous arguments still apply. Additions:
+=item * Soft timeouts
 
-=head2 max_children (constructor/import option)
+=item * Tagging
 
-  use Linux::Event::Fork;
+=item * Bounded parallelism (C<max_children>)
+
+=item * Internal queueing
+
+=item * C<drain()> callback
+
+=item * C<cancel_queued()> support
+
+=item * Introspection methods
+
+=back
+
+This module is intentionally minimal. It wires file descriptors,
+tracks lifecycle, and optionally enforces concurrency limits.
+
+=head1 CONFIGURATION
+
+Configuration is performed at runtime:
 
   my $fork = $loop->fork_helper(max_children => 4);
-  my $fork = Linux::Event::Fork->new(loop => $loop, max_children => 8);
 
-=head2 on_start
+The older compile-time idiom:
 
-  on_start => sub ($child) { ... }
+  use Linux::Event::Fork max_children => 4;
 
-Called when the child is actually spawned. If the request is queued, this runs later.
+is intentionally removed.
 
-=head1 RETURN VALUE
+=head1 SPAWNING CHILDREN
 
-Returns a L<Linux::Event::Fork::Child> handle if started immediately.
+=head2 cmd => [ ... ]
 
-If C<max_children> is set and the request is queued, returns a
-L<Linux::Event::Fork::Request> object.
+The simplest form. Forks, wires FDs, then execs immediately.
 
-=head1 SEE ALSO
+  $loop->fork(cmd => [ 'ls', '-l' ]);
 
-L<Linux::Event>, L<Linux::Event::Fork::Child>, L<Linux::Event::Fork::Exit>, L<Linux::Event::Fork::Request>
+=head2 child => sub { ... }
+
+Runs Perl code in the child after stdio plumbing.
+
+  $loop->fork(
+    child => sub {
+      exec 'sh', '-c', 'echo hello';
+      exit 127;
+    },
+  );
+
+Returning from the callback is treated as failure.
+
+=head1 BOUNDED PARALLELISM
+
+  my $fork = $loop->fork_helper(max_children => 4);
+
+When the pool is full, C<fork()> returns a
+C<Linux::Event::Fork::Request> object instead of a running child.
+Queued requests start automatically when capacity becomes available.
+
+=head1 DRAIN
+
+  $fork->drain(on_done => sub ($fork) {
+    $loop->stop;
+  });
+
+The callback fires once when:
+
+=over 4
+
+=item * No children are running
+
+=item * The queue is empty
+
+=back
+
+=head1 CANCEL QUEUED
+
+  $fork->cancel_queued(sub ($req) {
+    $req->tag eq 'low-priority';
+  });
+
+Only queued requests are affected. Running children are not modified.
+
+=head1 INTROSPECTION
+
+  $fork->running;
+  $fork->queued;
+  $fork->max_children;
+
+=head1 WHAT THIS MODULE IS NOT
+
+This is not:
+
+=over 4
+
+=item * A supervisor
+
+=item * A job scheduler
+
+=item * A framework
+
+=back
+
+It extends L<Linux::Event>; it does not replace it.
 
 =head1 AUTHOR
 
-Joshua S. Day (HAX)
+Joshua S. Day
 
 =head1 LICENSE
 
