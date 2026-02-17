@@ -6,14 +6,14 @@ use warnings;
 use Test2::V0;
 
 use Linux::Event;
-use Linux::Event::Fork max_children => 1;
+use Linux::Event::Fork;
 
 my $loop = Linux::Event->new;
-my $fork = $loop->fork_helper;
+my $fork = $loop->fork_helper(max_children => 1);
 
 is($fork->max_children, 1, 'max_children accessor');
-is($fork->running_count, 0, 'running_count starts at 0');
-is($fork->queued_count,  0, 'queued_count starts at 0');
+is($fork->running, 0, 'running starts at 0');
+is($fork->queued,  0, 'queued starts at 0');
 
 for my $i (1..3) {
   $loop->fork(
@@ -22,11 +22,11 @@ for my $i (1..3) {
   );
 }
 
-ok($fork->queued_count >= 0, 'queued_count after enqueue (non-negative)');
+ok($fork->queued >= 0, 'queued after enqueue (non-negative)');
 
 $fork->drain(on_done => sub ($fork) {
-  is($fork->running_count, 0, 'running_count back to 0 after drain');
-  is($fork->queued_count, 0, 'queued_count back to 0 after drain');
+  is($fork->running, 0, 'running back to 0 after drain');
+  is($fork->queued, 0, 'queued back to 0 after drain');
   $loop->stop;
 });
 

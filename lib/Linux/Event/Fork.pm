@@ -17,19 +17,25 @@ sub import ($class, %import) {
 
   no strict 'refs';
 
-  # If called again with no options, don't clobber existing installed methods.
-  if (!%import && defined &{"${loop_pkg}::fork"}) {
-    # Still ensure fork_helper exists below.
-  } else {
-    *{"${loop_pkg}::fork"} = sub ($loop, %args) {
-      my $fork = $loop->{_linux_event_fork} ||= $class->new(loop => $loop, %import);
-      return $fork->_spawn(%args) if $fork->can('_spawn');
-      return $fork->spawn(%args);
-    };
-  }
+  *{"${loop_pkg}::fork_helper"} = sub ($loop, %args) {
+    my $fork = $loop->{_linux_event_fork};
 
-  *{"${loop_pkg}::fork_helper"} = sub ($loop) {
-    return $loop->{_linux_event_fork} ||= $class->new(loop => $loop, %import);
+    if (!$fork) {
+      $fork = $loop->{_linux_event_fork} = $class->new(loop => $loop, %import, %args);
+      return $fork;
+    }
+
+    if (%args) {
+      $fork->_apply_config(%args);
+    }
+
+    return $fork;
+  };
+
+  *{"${loop_pkg}::fork"} = sub ($loop, %args) {
+    my $fork = $loop->fork_helper;
+    return $fork->_spawn(%args) if $fork->can('_spawn');
+    return $fork->spawn(%args);
   };
 
   return;
@@ -53,6 +59,19 @@ sub new ($class, %args) {
   }, $class;
 }
 
+sub _apply_config ($self, %args) {
+  my $max_children = delete $args{max_children};
+
+  croak "unknown args: " . join(", ", sort keys %args) if %args;
+
+  if (defined $max_children) {
+    croak "max_children must be a non-negative integer" if $max_children !~ /^\d+$/;
+    $self->{max_children} = 0 + $max_children;
+  }
+
+  return $self;
+}
+
 sub loop ($self) { return $self->{loop} }
 sub max_children ($self) { return $self->{max_children} }
 sub running ($self) { return $self->{running} }
@@ -69,17 +88,6 @@ sub spawn ($self, %spec) {
 
   return $self->_spawn_now(\%spec);
 }
-
-sub running_count ($self) {
-  return 0 + ($self->{running} // 0);
-}
-
-
-sub queued_count ($self) {
-  return 0 + scalar(@{ $self->{queue} });
-}
-
-
 
 sub _spawn_now ($self, $spec) {
   my %spec = %$spec;
@@ -354,7 +362,9 @@ Linux::Event::Fork - Minimal async child spawning on top of Linux::Event
 
   use v5.36;
   use Linux::Event;
-  use Linux::Event::Fork max_children => 4;   # installs $loop->fork with a limit
+  use Linux::Event::Fork; # configure max_children at runtime
+
+  my $fork = $loop->fork_helper(max_children => 4;   # installs $loop->fork with a limit
 
   my $loop = Linux::Event->new;
 
@@ -404,7 +414,9 @@ All previous arguments still apply. Additions:
 
 =head2 max_children (constructor/import option)
 
-  use Linux::Event::Fork max_children => 8;
+  use Linux::Event::Fork;
+
+  my $fork = $loop->fork_helper(max_children => 4);
   my $fork = Linux::Event::Fork->new(loop => $loop, max_children => 8);
 
 =head2 on_start
@@ -420,21 +432,8 @@ Returns a L<Linux::Event::Fork::Child> handle if started immediately.
 If C<max_children> is set and the request is queued, returns a
 L<Linux::Event::Fork::Request> object.
 
-=head1 INTROSPECTION
+=head1 SEE ALSO
 
-=head2 running_count
-
-  my $n = $loop->fork_helper->running_count;
-
-=head2 queued_count
-
-  my $n = $loop->fork_helper->queued_count;
-
-=head2 max_children
-
-  my $n = $loop->fork_helper->max_children;
-
-$1
 L<Linux::Event>, L<Linux::Event::Fork::Child>, L<Linux::Event::Fork::Exit>, L<Linux::Event::Fork::Request>
 
 =head1 AUTHOR

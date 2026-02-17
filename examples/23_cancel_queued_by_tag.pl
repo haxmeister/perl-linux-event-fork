@@ -5,7 +5,7 @@ use warnings;
 
 # WHAT THIS EXAMPLE SHOWS
 # -----------------------
-# * max_children => 1 so work queues up
+# * max_children => 1 so work queues up (configured at runtime)
 # * cancel_queued() to remove pending work (without touching a running child)
 # * drain() to stop when the pool becomes fully idle
 #
@@ -15,9 +15,10 @@ use warnings;
 #   you need your own policy (signals/kill/etc) to stop it.
 
 use Linux::Event;
-use Linux::Event::Fork max_children => 1;
+use Linux::Event::Fork;   # installs $loop->fork and $loop->fork_helper
 
 my $loop = Linux::Event->new;
+my $fork = $loop->fork_helper(max_children => 1);
 
 my $jobs = $ENV{JOBS} // 10;
 
@@ -37,8 +38,7 @@ for my $i (1 .. $jobs) {
   );
 }
 
-my $fork = $loop->fork_helper;
-
+# Cancel jobs 6..N before they ever start.
 my $canceled = $fork->cancel_queued(sub ($req) {
   my $tag = $req->tag // '';
   return $tag =~ /^job:(\d+)$/ && $1 >= 6;

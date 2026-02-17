@@ -5,7 +5,7 @@ use warnings;
 
 # WHAT THIS EXAMPLE SHOWS
 # -----------------------
-# * "Controlled parallelism" via:  use Linux::Event::Fork max_children => N
+# * Controlled parallelism via: $loop->fork_helper(max_children => N)
 # * Running many independent tasks (URLs) without writing a framework
 # * Using cmd=>[...] so the child execs immediately (clean + fast)
 # * Using drain() so the loop stops when all work is finished
@@ -17,9 +17,10 @@ use warnings;
 # * Some sites may block bots; use URLs you control if you want consistent results.
 
 use Linux::Event;
-use Linux::Event::Fork max_children => ($ENV{MAX} // 4);
+use Linux::Event::Fork;   # installs $loop->fork and $loop->fork_helper
 
 my $loop = Linux::Event->new;
+my $fork = $loop->fork_helper(max_children => ($ENV{MAX} // 4));
 
 my @urls = @ARGV ? @ARGV : (
   'https://example.com',
@@ -63,7 +64,7 @@ for my $url (@urls) {
   );
 }
 
-$loop->fork_helper->drain(on_done => sub ($fork) {
+$fork->drain(on_done => sub ($fork) {
   print "DONE (all URL jobs finished)\n";
   $loop->stop;
 });

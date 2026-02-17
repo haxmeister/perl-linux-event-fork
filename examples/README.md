@@ -4,11 +4,12 @@ These examples are intentionally small and focus on demonstrating specific behav
 
 ## 20_bounded_parallelism_with_drain.pl
 
-Demonstrates `max_children` (controlled parallelism) and `drain()` to stop the loop when all queued work has finished.
+Demonstrates controlled parallelism and `drain()` to stop the loop when all queued work has finished.
+(Configure with: `my $fork = $loop->fork_helper(max_children => N)`.)
 
 ## 21_web_fetch_pool.pl
 
-Runs one child per URL with bounded concurrency (`max_children`). Uses `cmd => [...]` and `drain()`.
+Runs one child per URL with bounded concurrency (set via `fork_helper(max_children => ...)`). Uses `cmd => [...]` and `drain()`.
 
 ## 22_timeout_kill.pl
 

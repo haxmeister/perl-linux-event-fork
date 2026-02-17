@@ -6,9 +6,11 @@ use warnings;
 use Test2::V0;
 
 use Linux::Event;
-use Linux::Event::Fork max_children => 2;
+use Linux::Event::Fork;
 
 my $loop = Linux::Event->new;
+
+my $fork = $loop->fork_helper(max_children => 2);
 
 my $N = $ENV{N} // 10;
 
