@@ -70,6 +70,17 @@ sub spawn ($self, %spec) {
   return $self->_spawn_now(\%spec);
 }
 
+sub running_count ($self) {
+  return 0 + ($self->{running} // 0);
+}
+
+
+sub queued_count ($self) {
+  return 0 + scalar(@{ $self->{queue} });
+}
+
+
+
 sub _spawn_now ($self, $spec) {
   my %spec = %$spec;
 
@@ -409,8 +420,21 @@ Returns a L<Linux::Event::Fork::Child> handle if started immediately.
 If C<max_children> is set and the request is queued, returns a
 L<Linux::Event::Fork::Request> object.
 
-=head1 SEE ALSO
+=head1 INTROSPECTION
 
+=head2 running_count
+
+  my $n = $loop->fork_helper->running_count;
+
+=head2 queued_count
+
+  my $n = $loop->fork_helper->queued_count;
+
+=head2 max_children
+
+  my $n = $loop->fork_helper->max_children;
+
+$1
 L<Linux::Event>, L<Linux::Event::Fork::Child>, L<Linux::Event::Fork::Exit>, L<Linux::Event::Fork::Request>
 
 =head1 AUTHOR

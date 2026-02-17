@@ -30,3 +30,4 @@ t/10-max-children-queue.t
 t/11-drain.t
 t/12-cancel-queued.t
 t/13-loop-methods.t
+t/14-introspection.t
