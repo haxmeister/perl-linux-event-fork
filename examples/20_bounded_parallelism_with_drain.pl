@@ -11,9 +11,11 @@ use warnings;
 # running, drain() fires and we stop the loop.
 
 use Linux::Event;
-use Linux::Event::Fork max_children => ($ENV{MAX} // 4);
+use Linux::Event::Fork;
+
 
 my $loop = Linux::Event->new;
+$loop->fork_helper(max_children => ($ENV{MAX} // 4));
 
 my $jobs = $ENV{JOBS} // 25;
 

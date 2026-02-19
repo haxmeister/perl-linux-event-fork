@@ -20,7 +20,7 @@ use Linux::Event::Fork;
 my $loop = Linux::Event->new;
 
 my $N = $ENV{N} // 200;
-my $TIMEOUT = $ENV{TIMEOUT} // 0.02;
+my $TIMEOUT = 0.02;
 
 my $done = 0;
 
