@@ -12,3 +12,6 @@ Revision history for Linux-Event-Fork
     - Removed compile-time max_children idiom
     - Cleaned and consolidated examples
     - Tightened POD to match README and stabilized API surface
+
+0.006  2026-02-18
+    - Add optional TERM escalation to SIGKILL via timeout_kill

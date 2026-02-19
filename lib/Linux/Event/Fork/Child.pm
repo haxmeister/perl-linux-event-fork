@@ -3,7 +3,7 @@ use v5.36;
 use strict;
 use warnings;
 
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 
 use Carp qw(croak);
 use Errno qw(EAGAIN EINTR EPIPE);
@@ -28,10 +28,12 @@ sub _new ($class, %args) {
     on_stderr => delete $args{on_stderr},
     on_exit   => delete $args{on_exit},
 
-    timeout_id  => undef,
-    on_timeout  => delete $args{on_timeout},
-    timeout_s   => delete $args{timeout_s},
-    timed_out   => 0,
+    timeout_id       => undef,
+    timeout_kill_id  => undef,
+    on_timeout       => delete $args{on_timeout},
+    timeout_s        => delete $args{timeout_s},
+    timeout_kill_s   => delete $args{timeout_kill_s},
+    timed_out        => 0,
 
     capture_stdout => delete $args{capture_stdout},
     capture_stderr => delete $args{capture_stderr},
@@ -138,6 +140,9 @@ sub cancel ($self) {
     if (defined(my $tid = delete $self->{timeout_id})) {
       $self->{loop}->cancel($tid);
     }
+    if (defined(my $tid = delete $self->{timeout_kill_id})) {
+      $self->{loop}->cancel($tid);
+    }
     if (my $sub = delete $self->{sub_pid}) { $sub->cancel }
   }
 
@@ -219,6 +224,16 @@ sub _on_timeout ($self) {
   }
 
   $self->kill('TERM');
+
+  if (defined $self->{timeout_kill_s} && $self->{timeout_kill_s} > 0) {
+    my $secs = 0 + $self->{timeout_kill_s};
+    $self->{timeout_kill_id} = $self->{loop}->after($secs, sub ($loop) {
+      return if $self->{_canceled};
+      return if $self->{saw_exit};
+      $self->kill('KILL');
+    });
+  }
+
   return;
 }
 

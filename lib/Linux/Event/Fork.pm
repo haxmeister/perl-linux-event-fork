@@ -3,7 +3,7 @@ use v5.36;
 use strict;
 use warnings;
 
-our $VERSION = '0.005';
+our $VERSION = '0.006';
 
 use Carp qw(croak);
 use POSIX ();
@@ -114,6 +114,7 @@ sub _spawn_now ($self, $spec) {
   my $on_exit    = delete $spec{on_exit};
   my $on_timeout = delete $spec{on_timeout};
   my $timeout    = delete $spec{timeout};
+  my $timeout_kill = delete $spec{timeout_kill};
   my $on_start   = delete $spec{on_start};
 
   my $tag  = delete $spec{tag};
@@ -125,6 +126,7 @@ sub _spawn_now ($self, $spec) {
   croak "on_timeout must be a coderef" if defined($on_timeout) && ref($on_timeout) ne 'CODE';
   croak "on_start must be a coderef"   if defined($on_start)   && ref($on_start)   ne 'CODE';
   croak "timeout must be numeric seconds" if defined($timeout) && ref($timeout);
+  croak "timeout_kill must be numeric seconds" if defined($timeout_kill) && ref($timeout_kill);
 
   my $capture_stdout = delete $spec{capture_stdout};
   my $capture_stderr = delete $spec{capture_stderr};
@@ -250,8 +252,10 @@ sub _spawn_now ($self, $spec) {
     on_stderr => $on_stderr,
     on_exit   => $on_exit,
 
-    timeout_s  => $timeout,
-    on_timeout => $on_timeout,
+    timeout_s      => $timeout,
+
+    timeout_kill_s => $timeout_kill,
+    on_timeout     => $on_timeout,
 
     capture_stdout => $capture_stdout,
     capture_stderr => $capture_stderr,
@@ -368,18 +372,74 @@ Linux::Event::Fork - Async child process management for Linux::Event
 
   my $loop = Linux::Event->new;
 
-  # Optional: configure bounded parallelism
-  my $fork = $loop->fork_helper(max_children => 4);
+  # Create (or fetch) the per-loop helper and configure bounded parallelism:
+  my $fork = $loop->fork_helper(
+    max_children => 4,   # 0 disables queueing (unlimited concurrency)
+  );
 
-  $loop->fork(
-    cmd => [ $^X, '-we', 'print "hello\n"; exit 0' ],
+  # Spawn a child (returns Linux::Event::Fork::Child when started, or
+  # Linux::Event::Fork::Request if queued due to max_children).
+  my $h = $loop->fork(
+
+    # Exactly one of these is required:
+    cmd   => [ $^X, '-we', 'print "hello
+"; exit 0' ],
+    # child => sub { exec 'sh', '-c', 'echo hello'; exit 127 },
+
+    # Optional tagging / user data (stored on the child object):
+    tag  => 'example',
+    data => { req_id => 123 },
+
+    # Child process environment / setup:
+    cwd       => '/tmp',                 # chdir() before exec/child callback
+    umask     => 0o022,                  # umask() before exec/child callback
+    clear_env => 0,                      # if true, start with an empty %ENV
+    env       => { FOO => 'bar' },       # merged into %ENV (after clear_env)
+
+    # stdin handling:
+    stdin      => "input
+",            # write immediately after spawn
+    stdin_pipe => 0,                     # if false, close stdin after stdin write
+                                         # if true, keep stdin open for streaming
+
+    # stdout/stderr capture controls:
+    capture_stdout => 1,                 # default: enabled if on_stdout is set
+    capture_stderr => 1,                 # default: enabled if on_stderr is set
+
+    # Lifecycle hooks:
+    on_start => sub ($child) {
+      # Runs in the parent immediately after the child object is created.
+      # Use this to stash $child somewhere or to start streaming stdin.
+      #
+      # $child->stdin_write("more...
+") if you kept stdin open.
+    },
 
     on_stdout => sub ($child, $chunk) {
+      # Runs in the parent when stdout data is read from the child.
+      # If you set this callback, stdout capture is enabled by default.
       print $chunk;
     },
 
+    on_stderr => sub ($child, $chunk) {
+      # Runs in the parent when stderr data is read from the child.
+      # If you set this callback, stderr capture is enabled by default.
+      warn $chunk;
+    },
+
+    timeout => 5,                        # numeric seconds (soft timeout)
+
+    on_timeout => sub ($child) {
+      # Runs in the parent when the timeout expires.
+      # Use this to log or to take action (e.g. request termination).
+      warn "child timed out: " . $child->pid;
+    },
+
     on_exit => sub ($child, $exit) {
-      print "exit code: " . $exit->code . "\n";
+      # Runs in the parent when the child reaps.
+      # Use $exit for status info; stop the loop, start another job, etc.
+      print "exit code: " . $exit->code . "
+";
       $loop->stop;
     },
   );
@@ -421,15 +481,37 @@ tracks lifecycle, and optionally enforces concurrency limits.
 
 =head1 CONFIGURATION
 
-Configuration is performed at runtime:
+Configuration is performed at runtime via C<fork_helper()>:
 
   my $fork = $loop->fork_helper(max_children => 4);
+
+Calling C<fork_helper()> always returns the per-loop helper (creating it on first
+use). You may call it again later to adjust settings:
+
+  $loop->fork_helper(max_children => 8);
+
+=head2 fork_helper( max_children => $n )
+
+=over 4
+
+=item * C<max_children =E<gt> 0> (default)
+
+Disable queueing and allow unlimited concurrent children.
+
+=item * C<max_children =E<gt> $n> (C<$n> E<gt>= 1)
+
+Enable bounded parallelism. When at capacity, C<fork()> returns a
+L<Linux::Event::Fork::Request> handle and the request is queued until capacity
+is available.
+
+=back
 
 The older compile-time idiom:
 
   use Linux::Event::Fork max_children => 4;
 
 is intentionally removed.
+
 
 =head1 SPAWNING CHILDREN
 
@@ -451,6 +533,105 @@ Runs Perl code in the child after stdio plumbing.
   );
 
 Returning from the callback is treated as failure.
+
+
+=head2 on_start => sub ($child) { ... }
+
+Runs in the parent immediately after the child object is created (and before any
+I/O callbacks fire). This is useful for stashing the handle somewhere, attaching
+it to higher-level state, or beginning a streaming stdin session.
+
+=head2 on_stdout => sub ($child, $chunk) { ... }
+
+Runs in the parent whenever stdout data is read from the child.
+
+If this callback is provided, stdout capture is enabled by default (see
+C<capture_stdout>).
+
+=head2 on_stderr => sub ($child, $chunk) { ... }
+
+Runs in the parent whenever stderr data is read from the child.
+
+If this callback is provided, stderr capture is enabled by default (see
+C<capture_stderr>).
+
+=head2 on_exit => sub ($child, $exit) { ... }
+
+Runs in the parent when the child is reaped.
+
+The second argument is a L<Linux::Event::Fork::Exit> object (see that class for
+status inspection methods such as C<code>).
+
+=head2 timeout => $seconds
+
+Sets a soft timeout in numeric seconds. If the timeout expires, C<on_timeout>
+fires (if provided).
+
+=head2 on_timeout => sub ($child) { ... }
+
+Runs in the parent when the timeout expires (if C<timeout> is set). This is
+typically used to log, to notify higher layers, or to request termination.
+
+=head2 stdin => $string
+
+If provided, the string is written to the child's stdin immediately after spawn.
+
+By default, stdin is then closed (see C<stdin_pipe>).
+
+=head2 stdin_pipe => $bool
+
+Controls whether the child's stdin remains open after any initial C<stdin>
+write.
+
+=over 4
+
+=item * false (default): close stdin after the C<stdin> write (if any)
+
+=item * true: keep stdin open so you can stream with C<$child-E<gt>stdin_write(...)>
+
+=back
+
+If true, a stdin pipe is created even if C<stdin> is not provided.
+
+=head2 capture_stdout => $bool
+
+Enable/disable stdout capture. Defaults to true if C<on_stdout> is provided,
+otherwise false.
+
+=head2 capture_stderr => $bool
+
+Enable/disable stderr capture. Defaults to true if C<on_stderr> is provided,
+otherwise false.
+
+=head2 cwd => $path
+
+If provided, the child does a C<chdir($path)> before executing the command (or
+before running the C<child> callback).
+
+=head2 umask => $mask
+
+If provided, the child sets C<umask($mask)> before executing the command (or
+before running the C<child> callback).
+
+=head2 clear_env => $bool
+
+If true, the child starts with an empty C<%ENV> before applying C<env>.
+
+=head2 env => { KEY => VALUE, ... }
+
+If provided, these pairs are merged into C<%ENV> in the child after any
+C<clear_env> processing.
+
+=head2 tag => $value
+
+An arbitrary tag stored on the child object. Useful for identifying jobs in
+callbacks.
+
+=head2 data => $value
+
+Arbitrary user data stored on the child object. Use this to avoid closure
+captures in callbacks.
+
 
 =head1 BOUNDED PARALLELISM
 
