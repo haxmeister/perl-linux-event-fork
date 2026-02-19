@@ -7,7 +7,7 @@ use warnings;
 # -----------------------
 # * Controlled parallelism via: $loop->fork_helper(max_children => N)
 # * Running many independent tasks (URLs) without writing a framework
-# * Using sub=>{...} to load an http client
+# * Using cmd=>[...] so the child execs immediately (clean + fast)
 # * Using drain() so the loop stops when all work is finished
 #
 # NOTES
@@ -34,18 +34,20 @@ for my $url (@urls) {
     tag => $url,
 
     # Print exactly one line to keep the demo simple.
-    child => sub{
-      require HTTP::Tiny;
-
-      my $res = HTTP::Tiny->new->get($url);
-      if ($res->{success}) {
-        print "OK $url status=$res->{status}\n";
-        exit 0;
-      } else {
-        print "FAIL $url status=$res->{status} reason=$res->{reason}\n";
-        exit 1;
-      }
-    },
+    cmd => [
+      $^X, '-we', qq{
+        require HTTP::Tiny;
+        my $u = shift;
+        my $res = HTTP::Tiny->new->get($u);
+        if ($res->{success}) {
+          print "OK $u status=$res->{status}\n";
+          exit 0;
+        } else {
+          print "FAIL $u status=$res->{status} reason=$res->{reason}\n";
+          exit 1;
+        }
+      }, $url
+    ],
 
     on_stdout => sub ($child, $chunk) {
       print "[stdout] $chunk";
@@ -62,11 +64,9 @@ for my $url (@urls) {
   );
 }
 
-$fork->drain(
-  on_done => sub ($fork) {
-    print "DONE (all URL jobs finished)\n";
-    $loop->stop;
-  }
-);
+$fork->drain(on_done => sub ($fork) {
+  print "DONE (all URL jobs finished)\n";
+  $loop->stop;
+});
 
 $loop->run;

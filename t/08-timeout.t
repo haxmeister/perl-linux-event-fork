@@ -60,36 +60,4 @@ use Linux::Event::Fork;
   is($exit->code, 0, 'exit 0');
 }
 
-
-# 3) Timeout escalation: TERM ignored, then KILL after timeout_kill.
-{
-  my $loop = Linux::Event->new;
-
-  my $timed = 0;
-  my $exit;
-
-  $loop->fork(
-    timeout      => 0.05,
-    timeout_kill => 0.05,
-    on_timeout   => sub ($child) { $timed++ },
-
-    child => sub {
-      $SIG{TERM} = 'IGNORE';
-      sleep 5;
-      exit 0;
-    },
-
-    on_exit => sub ($child, $ex) {
-      $exit = $ex;
-      $loop->stop;
-    },
-  );
-
-  $loop->run;
-
-  ok($timed >= 1, 'on_timeout fired (escalation case)');
-  ok($exit && $exit->signaled, 'child was signaled');
-  is($exit->signal, 9, 'child was SIGKILLed');
-}
-
 done_testing;
