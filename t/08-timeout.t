@@ -60,7 +60,8 @@ use Linux::Event::Fork;
   is($exit->code, 0, 'exit 0');
 }
 
-# 3) Optional escalation: after timeout sends TERM, then KILL if still alive.
+
+# 3) Timeout escalation: TERM ignored, then KILL after timeout_kill.
 {
   my $loop = Linux::Event->new;
 
@@ -86,7 +87,7 @@ use Linux::Event::Fork;
 
   $loop->run;
 
-  ok($timed >= 1, 'on_timeout fired');
+  ok($timed >= 1, 'on_timeout fired (escalation case)');
   ok($exit && $exit->signaled, 'child was signaled');
   is($exit->signal, 9, 'child was SIGKILLed');
 }

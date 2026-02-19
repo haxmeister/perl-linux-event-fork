@@ -12,45 +12,44 @@ use Fcntl qw(F_GETFL F_SETFL O_NONBLOCK);
 use Linux::Event::Fork::Child ();
 use Linux::Event::Fork::Request ();
 
-sub import ($class, %import) {
+sub import ($class, @args) {
+  # Option A: no import-time configuration. Configure at runtime via $loop->fork_helper(...).
+  croak "import-time options are not supported; configure at runtime via \$loop->fork_helper(...)" if @args;
+
   my $loop_pkg = 'Linux::Event::Loop';
 
   no strict 'refs';
 
-  # If called again with no options, don't clobber existing installed methods.
-  if (!%import && defined &{"${loop_pkg}::fork"}) {
-    # Still ensure fork_helper exists below.
-  } else {
+  # Install $loop->fork(...) and $loop->fork_helper(...) once.
+  if (!defined &{"${loop_pkg}::fork"}) {
     *{"${loop_pkg}::fork"} = sub ($loop, %args) {
-      my $fork = $loop->{_linux_event_fork} ||= $class->new(loop => $loop, %import);
+      my $fork = $loop->{_linux_event_fork} ||= $class->new(loop => $loop);
       return $fork->_spawn(%args) if $fork->can('_spawn');
       return $fork->spawn(%args);
     };
   }
 
   *{"${loop_pkg}::fork_helper"} = sub ($loop, %args) {
-  # Return the per-loop helper (create on first use).
-  my $fork = $loop->{_linux_event_fork};
+    # Return the per-loop helper (create on first use).
+    my $fork = $loop->{_linux_event_fork};
 
-  if (!$fork) {
-    $fork = $loop->{_linux_event_fork} = $class->new(loop => $loop, %import, %args);
-    return $fork;
-  }
-
-  # Allow runtime reconfiguration (currently only max_children).
-  if (%args) {
-    my $max_children = delete $args{max_children};
-    if (defined $max_children) {
-      $max_children = 0 if !defined $max_children;
-      croak "max_children must be a non-negative integer" if $max_children !~ /^\\d+$/;
-      $fork->{max_children} = 0 + $max_children;
+    if (!$fork) {
+      $fork = $loop->{_linux_event_fork} = $class->new(loop => $loop, %args);
+      return $fork;
     }
-    croak "unknown args: " . join(", ", sort keys %args) if %args;
-  }
 
-  return $fork;
-};
+    # Allow runtime reconfiguration (currently only max_children).
+    if (%args) {
+      my $max_children = delete $args{max_children};
+      if (defined $max_children) {
+        croak "max_children must be a non-negative integer" if $max_children !~ /^\d+$/;
+        $fork->{max_children} = 0 + $max_children;
+      }
+      croak "unknown args: " . join(", ", sort keys %args) if %args;
+    }
 
+    return $fork;
+  };
 
   return;
 }
@@ -253,7 +252,6 @@ sub _spawn_now ($self, $spec) {
     on_exit   => $on_exit,
 
     timeout_s      => $timeout,
-
     timeout_kill_s => $timeout_kill,
     on_timeout     => $on_timeout,
 
@@ -357,339 +355,93 @@ sub _set_nonblock ($fh) {
 
 1;
 
-
 __END__
 
 =head1 NAME
 
-Linux::Event::Fork - Async child process management for Linux::Event
+Linux::Event::Fork - Minimal async child spawning on top of Linux::Event
 
 =head1 SYNOPSIS
 
   use v5.36;
   use Linux::Event;
-  use Linux::Event::Fork;
+  use Linux::Event::Fork; # configure max_children at runtime
+
+  my $fork = $loop->fork_helper(max_children => 4;   # installs $loop->fork with a limit
 
   my $loop = Linux::Event->new;
 
-  # Create (or fetch) the per-loop helper and configure bounded parallelism:
-  my $fork = $loop->fork_helper(
-    max_children => 4,   # 0 disables queueing (unlimited concurrency)
-  );
+  my @jobs = (1..10);
+  my $pending = @jobs;
 
-  # Spawn a child (returns Linux::Event::Fork::Child when started, or
-  # Linux::Event::Fork::Request if queued due to max_children).
-  my $h = $loop->fork(
+  for my $n (@jobs) {
+    my $h = $loop->fork(
+      tag => "job:$n",
+      cmd => [ $^X, '-we', 'select(undef,undef,undef,0.05); print "ok\n"; exit 0' ],
 
-    # Exactly one of these is required:
-    cmd   => [ $^X, '-we', 'print "hello
-"; exit 0' ],
-    # child => sub { exec 'sh', '-c', 'echo hello'; exit 127 },
+      on_start => sub ($child) {
+        warn "started pid=" . $child->pid . " tag=" . $child->tag . "\n";
+      },
 
-    # Optional tagging / user data (stored on the child object):
-    tag  => 'example',
-    data => { req_id => 123 },
+      on_exit => sub ($child, $exit) {
+        $pending--;
+        $loop->stop if $pending == 0;
+      },
+    );
 
-    # Child process environment / setup:
-    cwd       => '/tmp',                 # chdir() before exec/child callback
-    umask     => 0o022,                  # umask() before exec/child callback
-    clear_env => 0,                      # if true, start with an empty %ENV
-    env       => { FOO => 'bar' },       # merged into %ENV (after clear_env)
-
-    # stdin handling:
-    stdin      => "input
-",            # write immediately after spawn
-    stdin_pipe => 0,                     # if false, close stdin after stdin write
-                                         # if true, keep stdin open for streaming
-
-    # stdout/stderr capture controls:
-    capture_stdout => 1,                 # default: enabled if on_stdout is set
-    capture_stderr => 1,                 # default: enabled if on_stderr is set
-
-    # Lifecycle hooks:
-    on_start => sub ($child) {
-      # Runs in the parent immediately after the child object is created.
-      # Use this to stash $child somewhere or to start streaming stdin.
-      #
-      # $child->stdin_write("more...
-") if you kept stdin open.
-    },
-
-    on_stdout => sub ($child, $chunk) {
-      # Runs in the parent when stdout data is read from the child.
-      # If you set this callback, stdout capture is enabled by default.
-      print $chunk;
-    },
-
-    on_stderr => sub ($child, $chunk) {
-      # Runs in the parent when stderr data is read from the child.
-      # If you set this callback, stderr capture is enabled by default.
-      warn $chunk;
-    },
-
-    timeout => 5,                        # numeric seconds (soft timeout)
-
-    on_timeout => sub ($child) {
-      # Runs in the parent when the timeout expires.
-      # Use this to log or to take action (e.g. request termination).
-      warn "child timed out: " . $child->pid;
-    },
-
-    on_exit => sub ($child, $exit) {
-      # Runs in the parent when the child reaps.
-      # Use $exit for status info; stop the loop, start another job, etc.
-      print "exit code: " . $exit->code . "
-";
-      $loop->stop;
-    },
-  );
+    # When max_children is reached, spawn() returns a Request object instead of a Child.
+    if ($h->isa('Linux::Event::Fork::Request')) {
+      warn "queued tag=" . ($h->tag // '') . "\n";
+    }
+  }
 
   $loop->run;
 
 =head1 DESCRIPTION
 
-B<Linux::Event::Fork> is a small policy layer built on top of
-L<Linux::Event>. It provides nonblocking child process management
-integrated directly into the event loop.
+B<Linux::Event::Fork> is a small policy-layer helper built on top of
+L<Linux::Event>. It installs an opt-in method C<< $loop->fork(...) >> into
+C<Linux::Event::Loop>.
 
-Features include:
+=head2 Controlled parallelism
 
-=over 4
+You can limit how many children are running at once via C<max_children>.
 
-=item * Nonblocking stdout/stderr capture
+When a limit is in effect and the limit is reached, C<spawn> (and C<< $loop->fork >>)
+will enqueue the request and return a L<Linux::Event::Fork::Request> handle. When a
+slot opens, queued requests are started FIFO.
 
-=item * Streaming stdin
+=head1 SPAWN ARGUMENTS
 
-=item * Soft timeouts
+All previous arguments still apply. Additions:
 
-=item * Tagging
+=head2 max_children (constructor/import option)
 
-=item * Bounded parallelism (C<max_children>)
-
-=item * Internal queueing
-
-=item * C<drain()> callback
-
-=item * C<cancel_queued()> support
-
-=item * Introspection methods
-
-=back
-
-This module is intentionally minimal. It wires file descriptors,
-tracks lifecycle, and optionally enforces concurrency limits.
-
-=head1 CONFIGURATION
-
-Configuration is performed at runtime via C<fork_helper()>:
+  use Linux::Event::Fork;
 
   my $fork = $loop->fork_helper(max_children => 4);
+  my $fork = Linux::Event::Fork->new(loop => $loop, max_children => 8);
 
-Calling C<fork_helper()> always returns the per-loop helper (creating it on first
-use). You may call it again later to adjust settings:
+=head2 on_start
 
-  $loop->fork_helper(max_children => 8);
+  on_start => sub ($child) { ... }
 
-=head2 fork_helper( max_children => $n )
+Called when the child is actually spawned. If the request is queued, this runs later.
 
-=over 4
+=head1 RETURN VALUE
 
-=item * C<max_children =E<gt> 0> (default)
+Returns a L<Linux::Event::Fork::Child> handle if started immediately.
 
-Disable queueing and allow unlimited concurrent children.
+If C<max_children> is set and the request is queued, returns a
+L<Linux::Event::Fork::Request> object.
 
-=item * C<max_children =E<gt> $n> (C<$n> E<gt>= 1)
+=head1 SEE ALSO
 
-Enable bounded parallelism. When at capacity, C<fork()> returns a
-L<Linux::Event::Fork::Request> handle and the request is queued until capacity
-is available.
-
-=back
-
-The older compile-time idiom:
-
-  use Linux::Event::Fork max_children => 4;
-
-is intentionally removed.
-
-
-=head1 SPAWNING CHILDREN
-
-=head2 cmd => [ ... ]
-
-The simplest form. Forks, wires FDs, then execs immediately.
-
-  $loop->fork(cmd => [ 'ls', '-l' ]);
-
-=head2 child => sub { ... }
-
-Runs Perl code in the child after stdio plumbing.
-
-  $loop->fork(
-    child => sub {
-      exec 'sh', '-c', 'echo hello';
-      exit 127;
-    },
-  );
-
-Returning from the callback is treated as failure.
-
-
-=head2 on_start => sub ($child) { ... }
-
-Runs in the parent immediately after the child object is created (and before any
-I/O callbacks fire). This is useful for stashing the handle somewhere, attaching
-it to higher-level state, or beginning a streaming stdin session.
-
-=head2 on_stdout => sub ($child, $chunk) { ... }
-
-Runs in the parent whenever stdout data is read from the child.
-
-If this callback is provided, stdout capture is enabled by default (see
-C<capture_stdout>).
-
-=head2 on_stderr => sub ($child, $chunk) { ... }
-
-Runs in the parent whenever stderr data is read from the child.
-
-If this callback is provided, stderr capture is enabled by default (see
-C<capture_stderr>).
-
-=head2 on_exit => sub ($child, $exit) { ... }
-
-Runs in the parent when the child is reaped.
-
-The second argument is a L<Linux::Event::Fork::Exit> object (see that class for
-status inspection methods such as C<code>).
-
-=head2 timeout => $seconds
-
-Sets a soft timeout in numeric seconds. If the timeout expires, C<on_timeout>
-fires (if provided).
-
-=head2 on_timeout => sub ($child) { ... }
-
-Runs in the parent when the timeout expires (if C<timeout> is set). This is
-typically used to log, to notify higher layers, or to request termination.
-
-=head2 stdin => $string
-
-If provided, the string is written to the child's stdin immediately after spawn.
-
-By default, stdin is then closed (see C<stdin_pipe>).
-
-=head2 stdin_pipe => $bool
-
-Controls whether the child's stdin remains open after any initial C<stdin>
-write.
-
-=over 4
-
-=item * false (default): close stdin after the C<stdin> write (if any)
-
-=item * true: keep stdin open so you can stream with C<$child-E<gt>stdin_write(...)>
-
-=back
-
-If true, a stdin pipe is created even if C<stdin> is not provided.
-
-=head2 capture_stdout => $bool
-
-Enable/disable stdout capture. Defaults to true if C<on_stdout> is provided,
-otherwise false.
-
-=head2 capture_stderr => $bool
-
-Enable/disable stderr capture. Defaults to true if C<on_stderr> is provided,
-otherwise false.
-
-=head2 cwd => $path
-
-If provided, the child does a C<chdir($path)> before executing the command (or
-before running the C<child> callback).
-
-=head2 umask => $mask
-
-If provided, the child sets C<umask($mask)> before executing the command (or
-before running the C<child> callback).
-
-=head2 clear_env => $bool
-
-If true, the child starts with an empty C<%ENV> before applying C<env>.
-
-=head2 env => { KEY => VALUE, ... }
-
-If provided, these pairs are merged into C<%ENV> in the child after any
-C<clear_env> processing.
-
-=head2 tag => $value
-
-An arbitrary tag stored on the child object. Useful for identifying jobs in
-callbacks.
-
-=head2 data => $value
-
-Arbitrary user data stored on the child object. Use this to avoid closure
-captures in callbacks.
-
-
-=head1 BOUNDED PARALLELISM
-
-  my $fork = $loop->fork_helper(max_children => 4);
-
-When the pool is full, C<fork()> returns a
-C<Linux::Event::Fork::Request> object instead of a running child.
-Queued requests start automatically when capacity becomes available.
-
-=head1 DRAIN
-
-  $fork->drain(on_done => sub ($fork) {
-    $loop->stop;
-  });
-
-The callback fires once when:
-
-=over 4
-
-=item * No children are running
-
-=item * The queue is empty
-
-=back
-
-=head1 CANCEL QUEUED
-
-  $fork->cancel_queued(sub ($req) {
-    $req->tag eq 'low-priority';
-  });
-
-Only queued requests are affected. Running children are not modified.
-
-=head1 INTROSPECTION
-
-  $fork->running;
-  $fork->queued;
-  $fork->max_children;
-
-=head1 WHAT THIS MODULE IS NOT
-
-This is not:
-
-=over 4
-
-=item * A supervisor
-
-=item * A job scheduler
-
-=item * A framework
-
-=back
-
-It extends L<Linux::Event>; it does not replace it.
+L<Linux::Event>, L<Linux::Event::Fork::Child>, L<Linux::Event::Fork::Exit>, L<Linux::Event::Fork::Request>
 
 =head1 AUTHOR
 
-Joshua S. Day
+Joshua S. Day (HAX)
 
 =head1 LICENSE
 

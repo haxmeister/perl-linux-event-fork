@@ -3,7 +3,7 @@ use v5.36;
 use strict;
 use warnings;
 
-our $VERSION = '0.006';
+our $VERSION = '0.004';
 
 use Carp qw(croak);
 use Errno qw(EAGAIN EINTR EPIPE);
@@ -227,13 +227,20 @@ sub _on_timeout ($self) {
 
   if (defined $self->{timeout_kill_s} && $self->{timeout_kill_s} > 0) {
     my $secs = 0 + $self->{timeout_kill_s};
-    $self->{timeout_kill_id} = $self->{loop}->after($secs, sub ($loop) {
-      return if $self->{_canceled};
-      return if $self->{saw_exit};
-      $self->kill('KILL');
-    });
+    my $loop = $self->{loop};
+    $self->{timeout_kill_id} = $loop->after($secs, sub ($loop) { $self->_on_timeout_kill });
   }
 
+  return;
+}
+
+sub _on_timeout_kill ($self) {
+  return if $self->{_canceled};
+  return if $self->{saw_exit};
+  # Only escalate if the soft timeout actually fired.
+  return if !$self->{timed_out};
+
+  $self->kill('KILL');
   return;
 }
 
