@@ -60,42 +60,57 @@ __END__
 
 =head1 NAME
 
-Linux::Event::Fork::Request - A queued spawn request when max_children is reached
+Linux::Event::Fork::Request - Queued child process request
 
 =head1 SYNOPSIS
 
-  my $forker = Linux::Event::Fork->new($loop, max_children => 2);
+  use v5.36;
+  use Linux::Event;
+  use Linux::Event::Fork;
 
-  my $h = $forker->spawn(cmd => [ ... ]);
+  my $loop = Linux::Event->new;
 
-  if ($h->isa('Linux::Event::Fork::Request')) {
-    $h->cancel;   # prevent it from ever starting
+  my $fork = $loop->fork_helper(max_children => 2);
+
+  my $req = $loop->fork(
+    cmd => [qw(/bin/sleep 5)],
+    tag => "job-1",
+
+    on_exit => sub ($child, $exit) {
+      say "job finished";
+    },
+  );
+
+  if ($req->isa('Linux::Event::Fork::Request')) {
+    say "request queued";
   }
+
+  # cancel before it starts
+  $req->cancel;
 
 =head1 DESCRIPTION
 
-When bounded parallelism is enabled (C<max_children>) and the limit has been
-reached, L<Linux::Event::Fork> enqueues the spawn request and returns a Request
-object.
+A B<Linux::Event::Fork::Request> represents a fork request that has not yet
+started because the fork helper has reached its C<max_children> limit.
 
-Requests are started FIFO as capacity frees.
+When capacity becomes available, the helper converts the request into a
+L<Linux::Event::Fork::Child> object and the child process starts.
 
-A Request is a handle for I<queued work>. Once it starts, it produces a
+Requests allow applications to inspect or cancel queued work before it begins.
+
+=head1 LIFECYCLE
+
+A request transitions through these states:
+
+  queued -> started -> child object created
+
+or
+
+  queued -> cancelled
+
+Once a request has started it is no longer represented by a Request object;
+instead the running process is represented by a
 L<Linux::Event::Fork::Child>.
-
-=head1 EXECUTION MODEL
-
-All methods on this object are called from the B<parent process>.
-
-Starting of queued requests happens in the parent, driven by the event loop
-when capacity becomes available.
-
-=head1 IMPORTANT BEHAVIOR
-
-=head2 Spec is copied at enqueue time
-
-The original spawn spec is copied when the Request is created. Later mutation by
-the caller cannot affect queued work.
 
 =head1 METHODS
 
@@ -103,48 +118,77 @@ the caller cannot affect queued work.
 
   my $ok = $req->cancel;
 
-Cancels a queued request (only if it has not yet started).
+Cancels the queued request before it starts.
 
-Returns true on the first successful cancel, false if it was already canceled.
+Returns true if the request was successfully cancelled. Returns false if the
+request has already started or was previously cancelled.
 
-If the request has already started, cancel has no effect on the child.
+Cancellation removes the request from the fork helper queue.
 
-=head2 started
+=head2 is_cancelled
 
-  if ($req->started) { ... }
+  if ($req->is_cancelled) { ... }
 
-True once the request has started and a child has been spawned.
-
-=head2 child
-
-  my $child = $req->child;
-
-Returns the L<Linux::Event::Fork::Child> handle once the request starts.
-
-Returns undef while still queued (or if canceled before start).
+Returns true if the request has been cancelled.
 
 =head2 tag
 
   my $tag = $req->tag;
 
-Returns the tag copied from the original spawn request.
+Returns the tag associated with the request (if any).
 
 =head2 data
 
   my $data = $req->data;
 
-Returns the data payload copied from the original spawn request.
+Returns the opaque user data associated with the request.
 
-=head1 RELATIONSHIP TO cancel_queued
+=head2 helper
 
-L<Linux::Event::Fork> provides C<cancel_queued(...)> on the forker object to cancel
-queued requests in bulk (typically by predicate, tag, or data).
+  my $fork = $req->helper;
 
-This object-level C<cancel()> cancels exactly one specific request handle.
+Returns the L<Linux::Event::Fork> helper that owns the queue.
+
+=head2 spec
+
+  my $spec = $req->spec;
+
+Returns the fork specification hash that will be used when the request starts.
+
+This is primarily intended for diagnostics and debugging.
+
+=head1 QUEUE SEMANTICS
+
+Queued requests are processed in FIFO order.
+
+When a running child exits and capacity becomes available, the helper starts
+the next request from the queue.
+
+If multiple requests are cancelled, they are simply skipped when the queue is
+advanced.
+
+=head1 ERROR HANDLING
+
+Cancelling a request that has already started has no effect.
+
+Requests that are cancelled will never spawn a child and none of the fork
+callbacks will run.
+
+=head1 SEE ALSO
+
+L<Linux::Event> - core event loop
+
+L<Linux::Event::Listen> - server-side socket acquisition
+
+L<Linux::Event::Connect> - client-side socket acquisition
+
+L<Linux::Event::Fork> - asynchronous child processes
+
+L<Linux::Event::Clock> - high resolution monotonic clock utilities
 
 =head1 AUTHOR
 
-Joshua S. Day (HAX)
+Joshua S. Day
 
 =head1 LICENSE
 

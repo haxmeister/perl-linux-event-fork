@@ -35,100 +35,133 @@ __END__
 
 =head1 NAME
 
-Linux::Event::Fork::Exit - Value object describing how a child process ended
+Linux::Event::Fork::Exit - Child process exit information
 
 =head1 SYNOPSIS
 
-  my $forker = Linux::Event::Fork->new($loop);
+  use v5.36;
+  use Linux::Event;
+  use Linux::Event::Fork;
 
-  $forker->spawn(
-    cmd => [ ... ],
+  my $loop = Linux::Event->new;
+
+  $loop->fork(
+    cmd => [qw(/bin/false)],
+
     on_exit => sub ($child, $exit) {
       if ($exit->exited) {
-        say "pid=" . $exit->pid . " exit code=" . $exit->code;
-      } else {
-        say "pid=" . $exit->pid . " signal=" . $exit->signal;
+        say "exit code: " . $exit->exit_code;
+      }
+      elsif ($exit->signaled) {
+        say "terminated by signal " . $exit->signal;
       }
     },
   );
 
+  $loop->run;
+
 =head1 DESCRIPTION
 
-A C<Linux::Event::Fork::Exit> object describes the termination state of a child
-process. It is passed to the C<on_exit> callback in the parent process.
+A B<Linux::Event::Fork::Exit> object represents the termination status of a
+child process.
 
-It provides a stable interface over the raw C<waitpid> status.
+It wraps the raw status value returned by C<wait(2)> or C<pidfd_wait()> and
+provides helper methods for interpreting it.
 
-=head1 EXECUTION MODEL
+Instances of this class are passed to the C<on_exit> callback of
+L<Linux::Event::Fork> child processes.
 
-Exit objects are created and observed in the B<parent process>.
+=head1 CALLBACK CONTRACT
 
-The C<on_exit> callback always runs in the parent, inside the Linux::Event
-event loop.
+The exit object is provided to the parent-side callback:
+
+  on_exit => sub ($child, $exit) { ... }
+
+Where:
+
+=over 4
+
+=item * C<$child>
+
+The L<Linux::Event::Fork::Child> object representing the process.
+
+=item * C<$exit>
+
+The L<Linux::Event::Fork::Exit> object describing the termination status.
+
+=back
 
 =head1 METHODS
-
-=head2 pid
-
-  my $pid = $exit->pid;
-
-Process ID of the child that exited.
 
 =head2 status
 
   my $status = $exit->status;
 
-The raw wait status integer as returned by C<waitpid>.
+Returns the raw wait status value.
+
+This is the same integer value returned by C<wait()> and compatible with the
+standard POSIX macros.
 
 =head2 exited
 
   if ($exit->exited) { ... }
 
-True if the child exited normally (via C<exit()> or returning from C<main>).
+Returns true if the process exited normally via C<exit()>.
 
-=head2 code
+=head2 exit_code
 
-  my $code = $exit->code;
+  my $code = $exit->exit_code;
 
-Exit code (0..255) if C<exited> is true.
+Returns the exit code (0 - 255) if the process exited normally.
+
+Returns undef if the process did not exit normally.
 
 =head2 signaled
 
   if ($exit->signaled) { ... }
 
-True if the child terminated due to a signal.
+Returns true if the process terminated due to a signal.
 
 =head2 signal
 
   my $sig = $exit->signal;
 
-Signal number if C<signaled> is true.
+Returns the terminating signal number if the process was killed by a signal.
 
-=head2 coredump
+Returns undef if the process exited normally.
 
-  if ($exit->coredump) { ... }
+=head2 core_dumped
 
-True if the child produced a core dump (platform-dependent).
+  if ($exit->core_dumped) { ... }
 
-=head1 INTERPRETATION GUIDE
+Returns true if the process terminated and produced a core dump.
 
-Exactly one of these will be true:
+=head1 NOTES
 
-=over 4
+These helpers are convenience wrappers around the traditional POSIX wait
+status interpretation logic:
 
-=item * C<< $exit->exited >>
+  WIFEXITED
+  WEXITSTATUS
+  WIFSIGNALED
+  WTERMSIG
+  WCOREDUMP
 
-Normal termination; use C<< $exit->code >>.
+=head1 SEE ALSO
 
-=item * C<< $exit->signaled >>
+L<Linux::Event> - core event loop
 
-Signal termination; use C<< $exit->signal >> (and optionally C<< $exit->coredump >>).
+L<Linux::Event::Listen> - server-side socket acquisition
 
-=back
+L<Linux::Event::Connect> - client-side socket acquisition
+
+L<Linux::Event::Fork> - asynchronous child processes
+
+L<Linux::Event::Clock> - high resolution monotonic clock utilities
 
 =head1 AUTHOR
 
-Joshua S. Day (HAX)
+Joshua S. Day
 
 =head1 LICENSE
 

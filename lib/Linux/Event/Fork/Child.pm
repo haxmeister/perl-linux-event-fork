@@ -379,27 +379,128 @@ __END__
 
 =head1 NAME
 
-Linux::Event::Fork::Child - Handle for a running (or exited) child process
+Linux::Event::Fork::Child - Handle for a running child process
 
 =head1 SYNOPSIS
 
-  my $child = $forker->spawn(
-    cmd => [ ... ],
-    stdin_pipe => 1,
-    on_stdout => sub ($child, $chunk) { ... },
-    on_exit   => sub ($child, $exit)  { ... },
+  use v5.36;
+  use Linux::Event;
+  use Linux::Event::Fork;
+
+  my $loop = Linux::Event->new;
+
+  my $child = $loop->fork(
+    cmd => [qw(/bin/echo hello)],
+
+    on_stdout => sub ($child, $bytes) {
+      print "stdout: $bytes";
+    },
+
+    on_stderr => sub ($child, $bytes) {
+      print "stderr: $bytes";
+    },
+
+    on_timeout => sub ($child) {
+      warn "child timed out (pid=" . $child->pid . ")\n";
+    },
+
+    on_exit => sub ($child, $exit) {
+      my $status = $exit->status;
+      print "pid " . $child->pid . " exited with status $status\n";
+    },
   );
 
-  $child->stdin_write("hello\n");
-  $child->close_stdin;
+  $loop->run;
 
 =head1 DESCRIPTION
 
-A Child object represents a spawned child process whose stdout/stderr/stdin
-may be connected to the parent and integrated with the event loop.
+A B<Linux::Event::Fork::Child> object represents a child process that has already
+started running.
 
-Objects of this class are returned by L<Linux::Event::Fork/spawn> when the child
-starts immediately.
+It provides:
+
+=over 4
+
+=item * Metadata access (pid, tag, data)
+
+=item * Nonblocking writes to the child's stdin (optional)
+
+=item * Signal delivery (kill)
+
+=item * Parent-side lifecycle callbacks (stdout/stderr/exit/timeout)
+
+=back
+
+Child objects are returned by C<< $loop->fork(...) >> when the child starts
+immediately. If the request is queued due to C<max_children>, the fork call
+returns a L<Linux::Event::Fork::Request> instead.
+
+=head1 LAYERING
+
+This object is part of L<Linux::Event::Fork> (process management). It is not part
+of the socket I/O stack.
+
+For sockets and buffered I/O, see:
+
+=over 4
+
+=item * L<Linux::Event::Listen> - accept produces an accepted fh
+
+=item * L<Linux::Event::Connect> - connect produces a connected fh
+
+=item * L<Linux::Event::Stream> - buffered I/O + backpressure, owns the fh
+
+=back
+
+=head1 EXECUTION MODEL
+
+All methods on this object are called from the B<parent process>.
+
+The only code that runs in the child process is your fork specification:
+
+=over 4
+
+=item * C<< cmd => [...] >> (exec)
+
+=item * C<< child => sub { ... } >> (runs in child)
+
+=back
+
+Callbacks such as C<on_stdout>, C<on_stderr>, C<on_exit>, and C<on_timeout> run in
+the parent, inside the Linux::Event event loop.
+
+=head1 CALLBACK CONTRACT
+
+Callbacks stored on the child are invoked with these signatures:
+
+=head2 on_stdout / on_stderr
+
+  on_stdout => sub ($child, $bytes) { ... }
+  on_stderr => sub ($child, $bytes) { ... }
+
+C<$bytes> is a byte string read from the corresponding pipe. Chunk sizing is an
+implementation detail; do not depend on a specific size.
+
+If no handler is provided (and capture is not forced), the corresponding stream
+may not be captured.
+
+=head2 on_timeout
+
+  on_timeout => sub ($child) { ... }
+
+Invoked when the timeout expires (as configured by the fork request). Timeout
+handling may send TERM and (optionally) escalate to KILL; see L<Linux::Event::Fork>
+for request-level timeout options.
+
+=head2 on_exit
+
+  on_exit => sub ($child, $exit) { ... }
+
+Invoked once when the child has exited and any enabled stdout/stderr streams have
+reached EOF.
+
+C<$exit> is a L<Linux::Event::Fork::Exit> object containing the raw wait status
+and convenience accessors.
 
 =head1 METHODS
 
@@ -407,109 +508,84 @@ starts immediately.
 
   my $pid = $child->pid;
 
-Process ID.
+Returns the PID of the running child.
 
 =head2 loop
 
   my $loop = $child->loop;
 
-Returns the L<Linux::Event> loop used to watch this child.
+Returns the owning loop instance.
 
 =head2 tag
 
   my $tag = $child->tag;
 
-Returns the tag provided to C<spawn> (or undef).
+Returns the tag associated with the fork request (if any).
 
 =head2 data
 
   my $data = $child->data;
 
-Returns the data payload provided to C<spawn> (or undef).
+Returns the arbitrary data payload associated with the fork request (if any).
 
-=head2 is_running
+=head2 kill
 
-  if ($child->is_running) { ... }
+  my $ok = $child->kill($signal);
 
-True until the child exit status has been observed.
+Sends a signal to the child process. Returns true on success.
 
-=head2 exit
+The default signal is C<TERM>:
 
-  my $exit = $child->exit;
+  $child->kill;         # TERM
+  $child->kill('KILL'); # KILL
 
-Returns a L<Linux::Event::Fork::Exit> after the child has exited.
+=head2 stdin_write
 
-Returns undef until exit occurs.
+  my $n = $child->stdin_write($bytes);
 
-=head2 kill($signal)
+Queue bytes for writing to the child's stdin and attempt to write immediately.
+Returns the number of bytes actually written synchronously during this call.
 
-  $child->kill('TERM');
-  $child->kill('KILL');
+Remaining bytes (if any) are written later by the event loop when stdin becomes
+writable.
 
-Sends a signal to the child process. Returns a boolean success value.
-
-=head2 stdin_write($bytes)
-
-  $child->stdin_write($bytes);
-
-Writes bytes to the child's stdin.
-
-This only works if stdin was created (C<stdin> or C<stdin_pipe> was used).
-
-If C<stdin_pipe> was not enabled, stdin may be closed automatically after the
-initial C<stdin> write.
+If stdin is not available for this child (no stdin pipe was created), this
+returns 0.
 
 =head2 close_stdin
 
   $child->close_stdin;
 
-Closes the child's stdin (immediately if no buffered bytes remain, otherwise once
-buffered bytes have been written).
+Closes the write end of the child's stdin.
 
-=head1 LIFECYCLE
+If there are buffered bytes pending, stdin will be closed after the buffered
+bytes are fully written.
 
-Typical progression:
-
-    created
-        |
-        +--> running
-                |
-                +--> exited
-                        |
-                        +--> on_exit callback fired
-
-After exit:
+=head1 LIFETIME NOTES
 
 =over 4
 
-=item *
-stdout/stderr watchers are removed
+=item * The Child object becomes inert after C<on_exit> runs.
 
-=item *
-stdin is closed
+=item * If stdout/stderr capture is enabled, C<on_exit> runs only after those
+streams reach EOF (so you do not lose trailing output).
 
-=item *
-C<is_running> becomes false
-
-=item *
-C<exit> returns a valid Exit object
+=item * Closing stdin early is explicit: call C<close_stdin> when you are done
+writing.
 
 =back
 
-=head1 SAFETY NOTES
+=head1 SEE ALSO
 
-=over 4
+L<Linux::Event> - core event loop
 
-=item *
-Do not call blocking operations inside callbacks.
+L<Linux::Event::Listen> - server-side socket acquisition
 
-=item *
-Do not assume ordering between stdout and stderr.
+L<Linux::Event::Connect> - client-side socket acquisition
 
-=item *
-Do not write to stdin after C<close_stdin>.
+L<Linux::Event::Fork> - asynchronous child processes
 
-=back
+L<Linux::Event::Clock> - high resolution monotonic clock utilities
 
 =head1 AUTHOR
 
